@@ -1,0 +1,8 @@
+.streamlit/secrets.toml
+work/python_packages/
+work/runtime_packages/
+work/runtime_clean/
+work/wheels/
+work/*.log
+work/*.pid
+__pycache__/
