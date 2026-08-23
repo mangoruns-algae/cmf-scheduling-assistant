@@ -68,6 +68,23 @@ def render_footer():
         unsafe_allow_html=True,
     )
 
+
+def authenticate_user(username, password):
+    """Return the configured username on success; username matching is case-insensitive."""
+    normalized_username = username.strip().casefold().encode("utf-8")
+    accounts = st.secrets.get("accounts", {})
+
+    for configured_username, configured_password in accounts.items():
+        username_ok = hmac.compare_digest(
+            normalized_username,
+            str(configured_username).casefold().encode("utf-8"),
+        )
+        password_ok = hmac.compare_digest(password, str(configured_password))
+        if username_ok and password_ok:
+            return str(configured_username)
+
+    return None
+
 logo_base64 = base64.b64encode(Path("assets/henlius-logo.png").read_bytes()).decode("ascii")
 st.markdown(
     f"""
@@ -195,10 +212,10 @@ if not st.session_state.get("authenticated", False):
                 submitted = st.form_submit_button("登录", type="primary", use_container_width=True)
 
             if submitted:
-                username_ok = hmac.compare_digest(username, st.secrets["auth"]["username"])
-                password_ok = hmac.compare_digest(password, st.secrets["auth"]["password"])
-                if username_ok and password_ok:
+                authenticated_username = authenticate_user(username, password)
+                if authenticated_username is not None:
                     st.session_state["authenticated"] = True
+                    st.session_state["username"] = authenticated_username
                     st.rerun()
                 else:
                     st.error("账户或密码错误，请检查后重试。")
@@ -206,7 +223,7 @@ if not st.session_state.get("authenticated", False):
     st.stop()
 
 with st.sidebar:
-    st.caption(f"当前账户：{st.secrets['auth']['username']}")
+    st.caption(f"当前账户：{st.session_state.get('username', '已登录用户')}")
     if st.button("退出登录", use_container_width=True):
         st.session_state.clear()
         st.rerun()
