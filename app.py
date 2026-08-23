@@ -5,6 +5,13 @@ from pathlib import Path
 import streamlit as st
 
 from excel_io import export_schedule_to_excel, read_input_excel
+from schedule_viewer import (
+    available_people,
+    export_schedule_pdf,
+    load_schedule_workbook,
+    matching_records,
+    render_schedule_html,
+)
 from scheduler import generate_schedule
 
 
@@ -168,6 +175,45 @@ st.markdown(
             text-align: center;
         }}
         .block-container {{ max-width: 1320px; padding-top: 2rem; padding-bottom: 2rem; }}
+        .schedule-wrap {{
+            max-height: 680px;
+            overflow: auto;
+            border: 1px solid #dfe5ed;
+            border-radius: 12px;
+            background: #ffffff;
+        }}
+        .schedule-table {{
+            width: 100%;
+            min-width: 1050px;
+            border-collapse: separate;
+            border-spacing: 0;
+            table-layout: fixed;
+            font-size: 13px;
+            line-height: 1.45;
+        }}
+        .schedule-table .date-col {{ width: 11%; }}
+        .schedule-table .time-col {{ width: 12%; }}
+        .schedule-table .work-col {{ width: 36%; }}
+        .schedule-table .lead-col {{ width: 14%; }}
+        .schedule-table .people-col {{ width: 27%; }}
+        .schedule-cell {{
+            padding: 9px 10px;
+            border-right: 1px solid #dfe5ed;
+            border-bottom: 1px solid #dfe5ed;
+            vertical-align: middle;
+            overflow-wrap: anywhere;
+        }}
+        .schedule-header {{
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            background: #d9eaf7 !important;
+            color: #17365d !important;
+        }}
+        .schedule-match {{
+            background: #fff2b2 !important;
+            box-shadow: inset 0 2px #e0a800, inset 0 -2px #e0a800;
+        }}
         div[data-testid="stMetric"] {{
             min-height: 104px;
             padding: 16px 18px;
@@ -228,135 +274,169 @@ with st.sidebar:
         st.session_state.clear()
         st.rerun()
 
-st.markdown(
-    """
-    <p class="cmf-intro">上传排班数据，依次核对人员、需求和规则后生成班表。</p>
-    <div class="cmf-steps">
-        <div class="cmf-step"><strong>1</strong>上传数据</div>
-        <div class="cmf-step"><strong>2</strong>检查基础信息</div>
-        <div class="cmf-step"><strong>3</strong>生成排班</div>
-        <div class="cmf-step"><strong>4</strong>下载结果</div>
-    </div>
-    """,
-    unsafe_allow_html=True,
+mode = st.radio(
+    "工作模式",
+    ["排班创建者", "排班预览者"],
+    horizontal=True,
+    key="work_mode",
+    help="创建者用于生成新班表；预览者用于只读查阅、个人定位和 PDF 导出。",
 )
 
-st.subheader("上传排班数据")
-st.caption("请选择基于 staff_scheduling_template.xlsx 填写的 Excel 文件。")
-uploaded = st.file_uploader("上传排班数据 Excel", type=["xlsx"], label_visibility="collapsed")
-if uploaded is None:
-    st.info("等待上传排班数据。上传成功后可检查人员、需求和规则。")
-    render_footer()
-    st.stop()
 
-try:
-    data = read_input_excel(uploaded)
-except Exception as exc:
-    st.error(str(exc))
-    render_footer()
-    st.stop()
-
-st.success(f"已读取 {uploaded.name}，请核对数据后生成排班。")
-
-staff = data["人员信息"]
-availability = data["人员可用性"]
-demand = data["用工需求"]
-rules = data["排班规则"]
-
-tab1, tab2, tab3, tab4 = st.tabs(["1  人员资源", "2  用工需求", "3  排班规则", "4  排班结果"])
-
-with tab1:
-    c1, c2, c3 = st.columns(3)
-    c1.metric("启用人员", int((staff["enabled"].astype(str).str.upper() == "Y").sum()))
-    c2.metric("所属产线", staff["home_line"].nunique())
-    c3.metric("可跨线人员", int((staff["can_cross_line"].astype(str).str.upper() == "Y").sum()))
-    st.markdown("#### 人员信息")
-    st.dataframe(
-        staff,
-        use_container_width=True,
-        hide_index=True,
-        height=table_height(staff),
-        column_config=table_config(staff),
+def render_creator_mode():
+    st.markdown(
+        """
+        <p class="cmf-intro">上传排班数据，依次核对人员、需求和规则后生成班表。</p>
+        <div class="cmf-steps">
+            <div class="cmf-step"><strong>1</strong>上传数据</div>
+            <div class="cmf-step"><strong>2</strong>检查基础信息</div>
+            <div class="cmf-step"><strong>3</strong>生成排班</div>
+            <div class="cmf-step"><strong>4</strong>下载结果</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
-    with st.expander(f"人员可用性（{len(availability)} 条）"):
-        st.dataframe(
-            availability,
-            use_container_width=True,
-            hide_index=True,
-            height=table_height(availability, maximum=420),
-            column_config=table_config(availability),
-        )
+    st.subheader("上传排班数据")
+    st.caption("请选择基于 staff_scheduling_template.xlsx 填写的 Excel 文件。")
+    uploaded = st.file_uploader("上传排班数据 Excel", type=["xlsx"], label_visibility="collapsed", key="creator_upload")
+    if uploaded is None:
+        st.info("等待上传排班数据。上传成功后可检查人员、需求和规则。")
+        return
 
-with tab2:
-    st.caption(f"共 {len(demand)} 条用工需求")
-    st.dataframe(
-        demand,
-        use_container_width=True,
-        hide_index=True,
-        height=table_height(demand),
-        column_config=table_config(demand),
-    )
+    try:
+        data = read_input_excel(uploaded)
+    except Exception as exc:
+        st.error(str(exc))
+        return
 
-with tab3:
-    st.caption(f"共 {len(rules)} 条排班规则")
-    st.dataframe(
-        rules,
-        use_container_width=True,
-        hide_index=True,
-        height=table_height(rules),
-        column_config=table_config(rules),
-    )
+    st.success(f"已读取 {uploaded.name}，请核对数据后生成排班。")
+    staff = data["人员信息"]
+    availability = data["人员可用性"]
+    demand = data["用工需求"]
+    rules = data["排班规则"]
+    tab1, tab2, tab3, tab4 = st.tabs(["1  人员资源", "2  用工需求", "3  排班规则", "4  排班结果"])
 
-with tab4:
-    action_col, action_space = st.columns([1, 3])
-    with action_col:
-        if st.button("生成排班", type="primary", use_container_width=True):
-            st.session_state["result"] = generate_schedule(staff, availability, demand, rules)
+    with tab1:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("启用人员", int((staff["enabled"].astype(str).str.upper() == "Y").sum()))
+        c2.metric("所属产线", staff["home_line"].nunique())
+        c3.metric("可跨线人员", int((staff["can_cross_line"].astype(str).str.upper() == "Y").sum()))
+        st.markdown("#### 人员信息")
+        st.dataframe(staff, use_container_width=True, hide_index=True, height=table_height(staff), column_config=table_config(staff))
+        with st.expander(f"人员可用性（{len(availability)} 条）"):
+            st.dataframe(availability, use_container_width=True, hide_index=True, height=table_height(availability, maximum=420), column_config=table_config(availability))
 
-    result = st.session_state.get("result")
-    if result is None:
-        st.info("点击“生成排班”开始计算。")
-    else:
+    with tab2:
+        st.caption(f"共 {len(demand)} 条用工需求")
+        st.dataframe(demand, use_container_width=True, hide_index=True, height=table_height(demand), column_config=table_config(demand))
+
+    with tab3:
+        st.caption(f"共 {len(rules)} 条排班规则")
+        st.dataframe(rules, use_container_width=True, hide_index=True, height=table_height(rules), column_config=table_config(rules))
+
+    with tab4:
+        action_col, _ = st.columns([1, 3])
+        with action_col:
+            if st.button("生成排班", type="primary", use_container_width=True):
+                st.session_state["result"] = generate_schedule(staff, availability, demand, rules)
+        result = st.session_state.get("result")
+        if result is None:
+            st.info("点击“生成排班”开始计算。")
+            return
         assigned = int((result["status"] == "已排班").sum()) if not result.empty else 0
         borrowed = int((result["assignment_type"] == "跨产线借调").sum()) if not result.empty else 0
         shortage = int((result["status"] == "缺员").sum()) if not result.empty else 0
-
         c1, c2, c3 = st.columns(3)
         c1.metric("已完成排班", assigned)
         c2.metric("跨产线借调", borrowed)
         c3.metric("缺员", shortage)
         st.markdown("#### 排班明细")
-        st.dataframe(
-            result,
-            use_container_width=True,
-            hide_index=True,
-            height=table_height(result),
-            column_config=table_config(result),
-        )
-
+        st.dataframe(result, use_container_width=True, hide_index=True, height=table_height(result), column_config=table_config(result))
         view = result[result["status"] == "已排班"].copy()
         if not view.empty:
-            view["安排"] = (
-                view["production_line"].astype(str)
-                + " / " + view["shift"].astype(str)
-                + " / " + view["task_type"].astype(str)
-            )
-            matrix = view.pivot_table(
-                index="employee_name", columns="date", values="安排", aggfunc=lambda values: "；".join(values)
-            )
+            view["安排"] = view["production_line"].astype(str) + " / " + view["shift"].astype(str) + " / " + view["task_type"].astype(str)
+            matrix = view.pivot_table(index="employee_name", columns="date", values="安排", aggfunc=lambda values: "；".join(values))
             st.subheader("人员 × 日期 班表视图")
             st.caption("横向滚动查看全部日期；每个单元格依次显示产线、班次和任务。")
             st.dataframe(matrix, use_container_width=True, height=table_height(matrix, maximum=460))
-
         output = export_schedule_to_excel(result, data)
-        download_col, download_space = st.columns([1, 3])
+        download_col, _ = st.columns([1, 3])
+        with download_col:
+            st.download_button("下载排班结果 Excel", data=output, file_name="排班结果.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+
+
+def render_viewer_mode():
+    st.markdown('<p class="cmf-intro">只读查阅已排好的生产班表，按姓名定位个人任务，并导出便于传阅的 PDF。</p>', unsafe_allow_html=True)
+    st.subheader("上传已排班文件")
+    st.caption("支持现有生产排班 Excel 模板；原文件不会被修改。")
+    uploaded = st.file_uploader("上传已排好的生产排班 Excel", type=["xlsx"], label_visibility="collapsed", key="viewer_upload")
+    if uploaded is None:
+        st.info("等待上传已排好的生产排班 Excel。")
+        return
+    try:
+        file_bytes = uploaded.getvalue()
+        schedule = load_schedule_workbook(file_bytes)
+    except Exception as exc:
+        st.error(f"无法读取排班文件：{exc}")
+        return
+
+    sheet_col, person_col = st.columns([1, 1])
+    with sheet_col:
+        selected_sheet = st.selectbox("排班工作表", schedule.schedule_sheets)
+    sheet = schedule.workbook[selected_sheet]
+    people = available_people(sheet)
+    with person_col:
+        selected_person = st.selectbox("人员定位", [""] + people, format_func=lambda value: value or "全部人员（不高亮）")
+
+    matches = matching_records(sheet, selected_person)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("排班工作表", selected_sheet)
+    c2.metric("识别人员", len(people))
+    c3.metric("个人相关任务", len(matches) if selected_person else "—")
+
+    st.markdown("#### 排班预览")
+    if selected_person:
+        st.caption(f"已用黄色标记 {selected_person} 涉及的日期、时间、工作内容和人员安排。")
+    else:
+        st.caption("表格保持原排班模板的五列结构和主要配色；可横向或纵向滚动查阅。")
+    st.markdown(render_schedule_html(sheet, selected_person), unsafe_allow_html=True)
+
+    if selected_person:
+        st.markdown("#### 个人班次清单")
+        if matches:
+            personal_rows = [
+                {
+                    "日期": item["日期"],
+                    "时间": item["时间"],
+                    "具体工作": item["工作内容"],
+                    "角色": "现场负责人" if selected_person in item["现场负责人"] else "人员安排",
+                }
+                for item in matches
+            ]
+            st.dataframe(personal_rows, use_container_width=True, hide_index=True, height=min(420, 44 + len(personal_rows) * 35))
+        else:
+            st.info("未找到该人员的相关班次。")
+
+    try:
+        pdf_bytes = export_schedule_pdf(sheet, selected_person)
+        filename_suffix = f"-{selected_person}" if selected_person else ""
+        download_col, _ = st.columns([1, 3])
         with download_col:
             st.download_button(
-                "下载排班结果 Excel",
-                data=output,
-                file_name="排班结果.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "导出排班 PDF",
+                data=pdf_bytes,
+                file_name=f"{selected_sheet}{filename_suffix}-排班预览.pdf",
+                mime="application/pdf",
+                type="primary",
                 use_container_width=True,
             )
+    except Exception as exc:
+        st.error(f"PDF 生成失败：{exc}")
+
+
+if mode == "排班创建者":
+    render_creator_mode()
+else:
+    render_viewer_mode()
 
 render_footer()
