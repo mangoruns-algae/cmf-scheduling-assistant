@@ -10,6 +10,64 @@ from scheduler import generate_schedule
 
 st.set_page_config(page_title="CMF 排班助手", page_icon="🤖", layout="wide")
 
+
+COLUMN_LABELS = {
+    "employee_id": "员工编号",
+    "employee_name": "员工姓名",
+    "home_line": "所属产线",
+    "role": "岗位角色",
+    "skills": "技能",
+    "qualified_lines": "资质产线",
+    "can_night_shift": "可上夜班",
+    "can_cross_line": "可跨线",
+    "max_consecutive_days": "最大连续工作天数",
+    "weekly_max_hours": "每周工时上限",
+    "enabled": "是否启用",
+    "remark": "备注",
+    "date": "日期",
+    "availability_status": "可用状态",
+    "available_shift": "可用班次",
+    "fixed_line": "固定产线",
+    "reason": "原因",
+    "production_line": "生产线",
+    "shift": "班次",
+    "batch_id": "批次号",
+    "task_type": "任务类型",
+    "required_role": "所需角色",
+    "required_skill": "所需技能",
+    "required_headcount": "需求人数",
+    "priority": "优先级",
+    "allow_borrowing": "允许借调",
+    "rule_code": "规则编码",
+    "rule_name": "规则名称",
+    "rule_value": "规则值",
+    "value_type": "值类型",
+    "scope": "适用范围",
+    "assignment_type": "安排类型",
+    "status": "排班状态",
+    "conflict_message": "冲突说明",
+}
+
+
+def table_config(frame):
+    """Return display-only column labels without changing the underlying data."""
+    return {column: COLUMN_LABELS[column] for column in frame.columns if column in COLUMN_LABELS}
+
+
+def table_height(frame, maximum=520):
+    return min(maximum, max(180, 44 + len(frame) * 35))
+
+
+def render_footer():
+    st.markdown(
+        """
+        <div class="cmf-footer">
+            版本 0.1&nbsp;&nbsp;·&nbsp;&nbsp;更新日期 2026.08.21&nbsp;&nbsp;·&nbsp;&nbsp;Powered by Qingyuan
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 logo_base64 = base64.b64encode(Path("assets/henlius-logo.png").read_bytes()).decode("ascii")
 st.markdown(
     f"""
@@ -17,82 +75,134 @@ st.markdown(
         .cmf-header {{
             display: flex;
             align-items: center;
-            gap: 32px;
-            min-height: 76px;
-            margin: 0 0 14px 0;
+            flex-wrap: wrap;
+            gap: 24px;
+            min-height: 94px;
+            margin: 0 0 12px 0;
+            padding: 8px 0;
+            overflow: visible;
         }}
         .cmf-header img {{
             display: block;
-            width: 330px;
+            width: clamp(300px, 27vw, 370px);
+            max-width: 100%;
             height: auto;
             flex: 0 0 auto;
+            object-fit: contain;
         }}
         .cmf-header h1 {{
             margin: 0;
-            padding: 0;
+            padding: 4px 0 6px;
             color: #262730;
-            font-size: 34px;
-            line-height: 1;
+            font-size: clamp(36px, 3.2vw, 44px);
+            line-height: 1.25;
             font-weight: 700;
-            white-space: nowrap;
+            flex: 0 1 auto;
+            white-space: normal;
+            overflow: visible;
         }}
-        .cmf-header .cmf-latin {{
-            display: inline-block;
-            font-size: 39px;
-            letter-spacing: 0.3px;
-            transform: translateY(1px);
+        .cmf-intro {{
+            margin: 0 0 24px 0;
+            color: #68707d;
+            font-size: 14px;
+            line-height: 1.6;
+        }}
+        .cmf-steps {{
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 10px;
+            margin: 4px 0 24px 0;
+        }}
+        .cmf-step {{
+            padding: 12px 14px;
+            border: 1px solid #e4e8ef;
+            border-radius: 10px;
+            background: #f8fafc;
+            color: #414957;
+            font-size: 14px;
+            font-weight: 600;
+            line-height: 1.35;
+        }}
+        .cmf-step strong {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 22px;
+            height: 22px;
+            margin-right: 7px;
+            border-radius: 50%;
+            background: #e8f1ff;
+            color: #1f5fae;
+            font-size: 12px;
         }}
         @media (max-width: 700px) {{
-            .cmf-header {{ gap: 18px; }}
-            .cmf-header img {{ width: 230px; }}
-            .cmf-header h1 {{ font-size: 27px; }}
-            .cmf-header .cmf-latin {{ font-size: 31px; }}
+            .cmf-header {{ align-items: flex-start; flex-direction: column; gap: 8px; min-height: auto; }}
+            .cmf-header img {{ width: min(320px, 92vw); }}
+            .cmf-header h1 {{ font-size: 34px; line-height: 1.25; }}
+            .cmf-steps {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
         }}
         .cmf-footer {{
-            position: fixed;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            z-index: 999;
-            padding: 8px 16px;
+            margin-top: 36px;
+            padding: 16px 12px 4px;
             border-top: 1px solid rgba(49, 51, 63, 0.10);
-            background: rgba(255, 255, 255, 0.92);
             color: #8b8f99;
             font-size: 12px;
             line-height: 1.4;
             text-align: center;
-            backdrop-filter: blur(6px);
         }}
-        .block-container {{ padding-bottom: 52px; }}
+        .block-container {{ max-width: 1320px; padding-top: 2rem; padding-bottom: 2rem; }}
+        div[data-testid="stMetric"] {{
+            min-height: 104px;
+            padding: 16px 18px;
+            border: 1px solid #e5e9f0;
+            border-radius: 12px;
+            background: #ffffff;
+        }}
+        div[data-testid="stButton"] button,
+        div[data-testid="stFormSubmitButton"] button,
+        div[data-testid="stDownloadButton"] button {{
+            transition: transform 140ms cubic-bezier(0.23, 1, 0.32, 1);
+        }}
+        div[data-testid="stButton"] button:active,
+        div[data-testid="stFormSubmitButton"] button:active,
+        div[data-testid="stDownloadButton"] button:active {{
+            transform: scale(0.98);
+        }}
+        @media (prefers-reduced-motion: reduce) {{
+            div[data-testid="stButton"] button,
+            div[data-testid="stFormSubmitButton"] button,
+            div[data-testid="stDownloadButton"] button {{ transition: none; }}
+        }}
     </style>
     <div class="cmf-header">
         <img src="data:image/png;base64,{logo_base64}" alt="Henlius 复宏汉霖 Logo">
-        <h1><span class="cmf-latin">CMF</span> 排班助手</h1>
-    </div>
-    <div class="cmf-footer">
-        版本 0.1&nbsp;&nbsp;·&nbsp;&nbsp;更新日期 2026.08.21&nbsp;&nbsp;·&nbsp;&nbsp;Powered by Qingyuan
+        <h1>CMF 排班助手</h1>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
 if not st.session_state.get("authenticated", False):
-    left_space, login_col, right_space = st.columns([1, 1.15, 1])
+    st.markdown('<p class="cmf-intro">安全登录后即可上传排班数据并生成班表。</p>', unsafe_allow_html=True)
+    left_space, login_col, right_space = st.columns([1, 0.9, 1])
     with login_col:
-        st.subheader("账户登录")
-        with st.form("login_form", clear_on_submit=False):
-            username = st.text_input("账户", placeholder="请输入账户")
-            password = st.text_input("密码", type="password", placeholder="请输入密码")
-            submitted = st.form_submit_button("登录", type="primary", use_container_width=True)
+        with st.container(border=True):
+            st.subheader("账户登录")
+            st.caption("请输入已授权的账户信息")
+            with st.form("login_form", clear_on_submit=False):
+                username = st.text_input("账户", placeholder="请输入账户")
+                password = st.text_input("密码", type="password", placeholder="请输入密码")
+                submitted = st.form_submit_button("登录", type="primary", use_container_width=True)
 
-        if submitted:
-            username_ok = hmac.compare_digest(username, st.secrets["auth"]["username"])
-            password_ok = hmac.compare_digest(password, st.secrets["auth"]["password"])
-            if username_ok and password_ok:
-                st.session_state["authenticated"] = True
-                st.rerun()
-            else:
-                st.error("账户或密码错误")
+            if submitted:
+                username_ok = hmac.compare_digest(username, st.secrets["auth"]["username"])
+                password_ok = hmac.compare_digest(password, st.secrets["auth"]["password"])
+                if username_ok and password_ok:
+                    st.session_state["authenticated"] = True
+                    st.rerun()
+                else:
+                    st.error("账户或密码错误，请检查后重试。")
+    render_footer()
     st.stop()
 
 with st.sidebar:
@@ -101,42 +211,90 @@ with st.sidebar:
         st.session_state.clear()
         st.rerun()
 
-st.caption("MVP：人员数据 + 可用性 + 生产用工需求 + 排班规则 → 自动生成班表")
+st.markdown(
+    """
+    <p class="cmf-intro">上传排班数据，依次核对人员、需求和规则后生成班表。</p>
+    <div class="cmf-steps">
+        <div class="cmf-step"><strong>1</strong>上传数据</div>
+        <div class="cmf-step"><strong>2</strong>检查基础信息</div>
+        <div class="cmf-step"><strong>3</strong>生成排班</div>
+        <div class="cmf-step"><strong>4</strong>下载结果</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-uploaded = st.file_uploader("上传排班数据 Excel", type=["xlsx"])
+st.subheader("上传排班数据")
+st.caption("请选择基于 staff_scheduling_template.xlsx 填写的 Excel 文件。")
+uploaded = st.file_uploader("上传排班数据 Excel", type=["xlsx"], label_visibility="collapsed")
 if uploaded is None:
-    st.info("请先上传 staff_scheduling_template.xlsx")
+    st.info("等待上传排班数据。上传成功后可检查人员、需求和规则。")
+    render_footer()
     st.stop()
 
 try:
     data = read_input_excel(uploaded)
 except Exception as exc:
     st.error(str(exc))
+    render_footer()
     st.stop()
+
+st.success(f"已读取 {uploaded.name}，请核对数据后生成排班。")
 
 staff = data["人员信息"]
 availability = data["人员可用性"]
 demand = data["用工需求"]
 rules = data["排班规则"]
 
-tab1, tab2, tab3, tab4 = st.tabs(["人员资源", "用工需求", "排班规则", "排班结果"])
+tab1, tab2, tab3, tab4 = st.tabs(["1  人员资源", "2  用工需求", "3  排班规则", "4  排班结果"])
 
 with tab1:
     c1, c2, c3 = st.columns(3)
     c1.metric("启用人员", int((staff["enabled"].astype(str).str.upper() == "Y").sum()))
     c2.metric("所属产线", staff["home_line"].nunique())
     c3.metric("可跨线人员", int((staff["can_cross_line"].astype(str).str.upper() == "Y").sum()))
-    st.dataframe(staff, use_container_width=True, hide_index=True)
+    st.markdown("#### 人员信息")
+    st.dataframe(
+        staff,
+        use_container_width=True,
+        hide_index=True,
+        height=table_height(staff),
+        column_config=table_config(staff),
+    )
+    with st.expander(f"人员可用性（{len(availability)} 条）"):
+        st.dataframe(
+            availability,
+            use_container_width=True,
+            hide_index=True,
+            height=table_height(availability, maximum=420),
+            column_config=table_config(availability),
+        )
 
 with tab2:
-    st.dataframe(demand, use_container_width=True, hide_index=True)
+    st.caption(f"共 {len(demand)} 条用工需求")
+    st.dataframe(
+        demand,
+        use_container_width=True,
+        hide_index=True,
+        height=table_height(demand),
+        column_config=table_config(demand),
+    )
 
 with tab3:
-    st.dataframe(rules, use_container_width=True, hide_index=True)
+    st.caption(f"共 {len(rules)} 条排班规则")
+    st.dataframe(
+        rules,
+        use_container_width=True,
+        hide_index=True,
+        height=table_height(rules),
+        column_config=table_config(rules),
+    )
 
 with tab4:
-    if st.button("🚀 生成排班", type="primary", use_container_width=True):
-        st.session_state["result"] = generate_schedule(staff, availability, demand, rules)
+    action_col, action_space = st.columns([1, 3])
+    with action_col:
+        if st.button("生成排班", type="primary", use_container_width=True):
+            st.session_state["result"] = generate_schedule(staff, availability, demand, rules)
 
     result = st.session_state.get("result")
     if result is None:
@@ -150,7 +308,14 @@ with tab4:
         c1.metric("已完成排班", assigned)
         c2.metric("跨产线借调", borrowed)
         c3.metric("缺员", shortage)
-        st.dataframe(result, use_container_width=True, hide_index=True)
+        st.markdown("#### 排班明细")
+        st.dataframe(
+            result,
+            use_container_width=True,
+            hide_index=True,
+            height=table_height(result),
+            column_config=table_config(result),
+        )
 
         view = result[result["status"] == "已排班"].copy()
         if not view.empty:
@@ -163,13 +328,18 @@ with tab4:
                 index="employee_name", columns="date", values="安排", aggfunc=lambda values: "；".join(values)
             )
             st.subheader("人员 × 日期 班表视图")
-            st.dataframe(matrix, use_container_width=True)
+            st.caption("横向滚动查看全部日期；每个单元格依次显示产线、班次和任务。")
+            st.dataframe(matrix, use_container_width=True, height=table_height(matrix, maximum=460))
 
         output = export_schedule_to_excel(result, data)
-        st.download_button(
-            "下载排班结果 Excel",
-            data=output,
-            file_name="排班结果.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
+        download_col, download_space = st.columns([1, 3])
+        with download_col:
+            st.download_button(
+                "下载排班结果 Excel",
+                data=output,
+                file_name="排班结果.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+
+render_footer()
