@@ -116,6 +116,113 @@ def matching_records(sheet, person):
     ]
 
 
+def generated_schedule_records(result):
+    """Convert the scheduler result into the same five-column read-only view."""
+    if result is None or result.empty:
+        return []
+    assigned = result[result["status"] == "已排班"].copy()
+    records = []
+    group_columns = ["date", "production_line", "shift", "batch_id", "task_type", "required_role"]
+    for values, group in assigned.groupby(group_columns, dropna=False, sort=True):
+        schedule_date, line, shift, batch, task, role = values
+        names = "、".join(dict.fromkeys(str(name) for name in group["employee_name"] if str(name).strip()))
+        role_text = "" if role is None else str(role)
+        records.append({
+            "row": len(records) + 2,
+            "日期": schedule_date.strftime("%Y-%m-%d") if hasattr(schedule_date, "strftime") else str(schedule_date),
+            "时间": str(shift),
+            "工作内容": " / ".join(part for part in (str(line), str(batch), str(task)) if part and part != "nan"),
+            "现场负责人": names if "负责人" in role_text else "",
+            "人员安排": "" if "负责人" in role_text else names,
+        })
+    return records
+
+
+def people_from_records(records):
+    candidates = set()
+    for record in records:
+        for field in ("现场负责人", "人员安排"):
+            for token in re.split(r"[、，,；;\n/（）()：:\s]+", record.get(field, "")):
+                if re.fullmatch(r"[\u4e00-\u9fff]{2,4}", token or ""):
+                    candidates.add(token)
+    return sorted(candidates)
+
+
+def render_records_html(records, selected_person=""):
+    header = "".join(f'<td class="schedule-cell schedule-header">{label}</td>' for label in SCHEDULE_HEADERS)
+    rows = [f"<tr>{header}</tr>"]
+    for record in records:
+        match_type = _record_match_type(record, selected_person)
+        cells = []
+        for index, label in enumerate(SCHEDULE_HEADERS):
+            classes = "schedule-cell"
+            if match_type == "participant":
+                classes += " schedule-match"
+            elif match_type == "leader" and index == 0:
+                classes += " schedule-leader-match"
+            cells.append(f'<td class="{classes}">{html.escape(str(record.get(label, ""))).replace(chr(10), "<br>")}</td>')
+        rows.append("<tr>" + "".join(cells) + "</tr>")
+    return f"""
+    <div class="schedule-wrap"><table class="schedule-table">
+      <colgroup><col class="date-col"><col class="time-col"><col class="work-col"><col class="lead-col"><col class="people-col"></colgroup>
+      {''.join(rows)}
+    </table></div>
+    """
+
+
+def export_records_pdf(records, title, selected_person=""):
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.lib.pagesizes import A3, landscape
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.platypus import KeepInFrame, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    buffer = io.BytesIO()
+    document = SimpleDocTemplate(buffer, pagesize=landscape(A3), rightMargin=10 * mm, leftMargin=10 * mm, topMargin=10 * mm, bottomMargin=10 * mm, title=title)
+    styles = getSampleStyleSheet()
+    body = ParagraphStyle("GeneratedBody", parent=styles["BodyText"], fontName="STSong-Light", fontSize=7.5, leading=10, alignment=TA_LEFT)
+    center = ParagraphStyle("GeneratedCenter", parent=body, alignment=TA_CENTER)
+    heading = ParagraphStyle("GeneratedTitle", parent=styles["Title"], fontName="STSong-Light", fontSize=16, leading=20, textColor=colors.HexColor("#17365D"))
+    story = [Paragraph(html.escape(title), heading), Spacer(1, 3 * mm)]
+    if selected_person:
+        story.extend([Paragraph(f"人员定位：{html.escape(selected_person)}（黄色为参与班次，蓝色日期为现场负责人）", body), Spacer(1, 2 * mm)])
+    data = [[Paragraph(label, center) for label in SCHEDULE_HEADERS]]
+    for record in records:
+        data.append([Paragraph(html.escape(str(record.get(label, ""))), center if label != "工作内容" else body) for label in SCHEDULE_HEADERS])
+    table = Table(data, colWidths=[31 * mm, 33 * mm, 133 * mm, 39 * mm, 150 * mm], repeatRows=1)
+    commands = [
+        ("FONTNAME", (0, 0), (-1, -1), "STSong-Light"), ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#AEB8C6")),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D9EAF7")), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]
+    for index, record in enumerate(records, start=1):
+        match_type = _record_match_type(record, selected_person)
+        if match_type == "participant":
+            commands.extend([("BACKGROUND", (0, index), (-1, index), colors.HexColor("#FFF2B2")), ("BOX", (0, index), (-1, index), 1, colors.HexColor("#E0A800"))])
+        elif match_type == "leader":
+            commands.extend([("BACKGROUND", (0, index), (0, index), colors.HexColor("#DCEBFF")), ("BOX", (0, index), (0, index), 1, colors.HexColor("#2F6FED"))])
+    table.setStyle(TableStyle(commands))
+    story.append(KeepInFrame(document.width, document.height - 28 * mm, [table], mode="shrink"))
+    document.build(story)
+    return buffer.getvalue()
+
+
+def _record_match_type(record, person):
+    if not person:
+        return ""
+    is_leader = person in record["现场负责人"]
+    is_participant = person in record["人员安排"]
+    if is_participant:
+        return "participant"
+    if is_leader:
+        return "leader"
+    return ""
+
+
 def _color_rgb(color, fallback):
     if color is None:
         return fallback
@@ -128,7 +235,33 @@ def _color_rgb(color, fallback):
 
 def render_schedule_html(sheet, selected_person=""):
     header_row, first_col, last_col, last_row = sheet_layout(sheet)
-    matched_rows = {record["row"] for record in matching_records(sheet, selected_person)}
+    records_by_row = {record["row"]: record for record in schedule_records(sheet)}
+    # A selected-person view deliberately expands merged cells. This prevents a
+    # date cell shared by several tasks from making unrelated tasks look selected.
+    if selected_person:
+        rows = []
+        header = "".join(f'<td class="schedule-cell schedule-header">{label}</td>' for label in SCHEDULE_HEADERS)
+        rows.append(f"<tr>{header}</tr>")
+        for record in records_by_row.values():
+            match_type = _record_match_type(record, selected_person)
+            cells = []
+            for index, label in enumerate(SCHEDULE_HEADERS):
+                classes = "schedule-cell"
+                if match_type == "participant":
+                    classes += " schedule-match"
+                elif match_type == "leader" and index == 0:
+                    classes += " schedule-leader-match"
+                cells.append(f'<td class="{classes}">{html.escape(record[label]).replace(chr(10), "<br>")}</td>')
+            rows.append("<tr>" + "".join(cells) + "</tr>")
+        return f"""
+        <div class="schedule-wrap">
+          <table class="schedule-table">
+            <colgroup><col class="date-col"><col class="time-col"><col class="work-col"><col class="lead-col"><col class="people-col"></colgroup>
+            {''.join(rows)}
+          </table>
+        </div>
+        """
+
     merged_starts = {}
     merged_covered = set()
     for merged in sheet.merged_cells.ranges:
@@ -159,8 +292,6 @@ def render_schedule_html(sheet, selected_person=""):
             classes = "schedule-cell"
             if row == header_row:
                 classes += " schedule-header"
-            if row in matched_rows:
-                classes += " schedule-match"
             attrs = f' rowspan="{rowspan}" colspan="{colspan}"' if rowspan > 1 or colspan > 1 else ""
             style = f"background:{fill};color:{color};text-align:{align};font-weight:{weight};"
             cells.append(
@@ -186,7 +317,7 @@ def export_schedule_pdf(sheet, selected_person=""):
     from reportlab.lib.units import mm
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-    from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.platypus import KeepInFrame, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
     pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
     buffer = io.BytesIO()
@@ -217,7 +348,7 @@ def export_schedule_pdf(sheet, selected_person=""):
         ])
 
     header_row, first_col, last_col, last_row = sheet_layout(sheet)
-    matched_rows = {record["row"] for record in matching_records(sheet, selected_person)}
+    records_by_row = {record["row"]: record for record in schedule_records(sheet)}
     table_data = []
     for row in range(header_row, last_row + 1):
         rendered = []
@@ -239,37 +370,22 @@ def export_schedule_pdf(sheet, selected_person=""):
         ("TOPPADDING", (0, 0), (-1, -1), 3),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
     ]
-    for source_row in matched_rows:
+    for source_row, record in records_by_row.items():
         table_row = source_row - header_row
-        commands.extend([
-            ("BACKGROUND", (0, table_row), (-1, table_row), colors.HexColor("#FFF2B2")),
-            ("BOX", (0, table_row), (-1, table_row), 1.1, colors.HexColor("#E0A800")),
-        ])
-    table.setStyle(TableStyle(commands))
-    story.append(table)
-
-    matches = matching_records(sheet, selected_person)
-    if selected_person and matches:
-        story.extend([PageBreak(), Paragraph(f"{html.escape(selected_person)} · 个人班次清单", title_style), Spacer(1, 4 * mm)])
-        personal_data = [[Paragraph(label, center_style) for label in ("日期", "时间", "具体工作", "角色")]]
-        for record in matches:
-            role = "现场负责人" if selected_person in record["现场负责人"] else "人员安排"
-            personal_data.append([
-                Paragraph(html.escape(record["日期"]), center_style),
-                Paragraph(html.escape(record["时间"]), center_style),
-                Paragraph(html.escape(record["工作内容"]), body_style),
-                Paragraph(role, center_style),
+        match_type = _record_match_type(record, selected_person)
+        if match_type == "participant":
+            commands.extend([
+                ("BACKGROUND", (0, table_row), (-1, table_row), colors.HexColor("#FFF2B2")),
+                ("BOX", (0, table_row), (-1, table_row), 1.0, colors.HexColor("#E0A800")),
             ])
-        personal = Table(personal_data, colWidths=[35 * mm, 42 * mm, 200 * mm, 42 * mm], repeatRows=1)
-        personal.setStyle(TableStyle([
-            ("FONTNAME", (0, 0), (-1, -1), "STSong-Light"),
-            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#AEB8C6")),
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D9EAF7")),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("TOPPADDING", (0, 0), (-1, -1), 4),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ]))
-        story.append(personal)
+        elif match_type == "leader":
+            commands.extend([
+                ("BACKGROUND", (0, table_row), (0, table_row), colors.HexColor("#DCEBFF")),
+                ("BOX", (0, table_row), (0, table_row), 1.0, colors.HexColor("#2F6FED")),
+            ])
+    table.setStyle(TableStyle(commands))
+    # KeepInFrame guarantees that even long schedules remain a single-page PDF.
+    story.append(KeepInFrame(document.width, document.height - 32 * mm, [table], mode="shrink"))
 
     document.build(story)
     return buffer.getvalue()

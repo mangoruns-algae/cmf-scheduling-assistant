@@ -1,5 +1,6 @@
 import base64
 import hmac
+from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
@@ -7,9 +8,13 @@ import streamlit as st
 from excel_io import export_schedule_to_excel, read_input_excel
 from schedule_viewer import (
     available_people,
+    export_records_pdf,
     export_schedule_pdf,
+    generated_schedule_records,
     load_schedule_workbook,
     matching_records,
+    people_from_records,
+    render_records_html,
     render_schedule_html,
 )
 from scheduler import generate_schedule
@@ -54,6 +59,18 @@ COLUMN_LABELS = {
     "status": "排班状态",
     "conflict_message": "冲突说明",
 }
+
+CREATOR_USERS = {"qingyuan_qin", "admin"}
+
+
+@st.cache_resource
+def locked_schedule_store():
+    """Process-wide published schedule shared by all active Streamlit sessions."""
+    return {}
+
+
+def can_create(username):
+    return str(username).casefold() in CREATOR_USERS
 
 
 def table_config(frame):
@@ -214,6 +231,12 @@ st.markdown(
             background: #fff2b2 !important;
             box-shadow: inset 0 2px #e0a800, inset 0 -2px #e0a800;
         }}
+        .schedule-leader-match {{
+            background: #dcebff !important;
+            box-shadow: inset 0 0 0 2px #2f6fed;
+            color: #174a9c !important;
+            font-weight: 700 !important;
+        }}
         div[data-testid="stMetric"] {{
             min-height: 104px;
             padding: 16px 18px;
@@ -269,18 +292,36 @@ if not st.session_state.get("authenticated", False):
     st.stop()
 
 with st.sidebar:
-    st.caption(f"当前账户：{st.session_state.get('username', '已登录用户')}")
+    current_username = st.session_state.get("username", "已登录用户")
+    creator_access = can_create(current_username)
+    st.caption(f"当前账户：{current_username}")
+    st.markdown("#### 权限清单")
+    st.markdown("✅ 排班预览")
+    st.markdown("✅ PDF 导出")
+    st.markdown("✅ 个人班次定位")
+    st.markdown("✅ 创建与发布排班" if creator_access else "🔒 创建与发布排班")
+    published = locked_schedule_store()
+    if published:
+        st.caption(f"已发布：{published.get('name', '当前班表')}")
+    else:
+        st.caption("当前暂无已发布班表")
+    st.divider()
     if st.button("退出登录", use_container_width=True):
         st.session_state.clear()
         st.rerun()
 
-mode = st.radio(
-    "工作模式",
-    ["排班创建者", "排班预览者"],
-    horizontal=True,
-    key="work_mode",
-    help="创建者用于生成新班表；预览者用于只读查阅、个人定位和 PDF 导出。",
-)
+if creator_access:
+    mode = st.radio(
+        "工作模式",
+        ["排班创建者", "排班预览者"],
+        horizontal=True,
+        key="work_mode",
+        help="创建者用于生成并发布新班表；预览者用于只读查阅、个人定位和 PDF 导出。",
+    )
+else:
+    mode = "排班预览者"
+    st.markdown("#### 排班预览者")
+    st.caption("当前账户为只读权限，已自动进入排班预览。")
 
 
 def render_creator_mode():
@@ -360,78 +401,97 @@ def render_creator_mode():
             st.caption("横向滚动查看全部日期；每个单元格依次显示产线、班次和任务。")
             st.dataframe(matrix, use_container_width=True, height=table_height(matrix, maximum=460))
         output = export_schedule_to_excel(result, data)
-        download_col, _ = st.columns([1, 3])
+        download_col, publish_col, _ = st.columns([1, 1, 2])
         with download_col:
             st.download_button("下载排班结果 Excel", data=output, file_name="排班结果.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        with publish_col:
+            if st.button("锁定并发布班表", type="primary", use_container_width=True):
+                store = locked_schedule_store()
+                store.clear()
+                store.update({
+                    "kind": "generated",
+                    "name": "排班结果",
+                    "records": generated_schedule_records(result),
+                    "excel": output,
+                    "locked_by": current_username,
+                    "locked_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                })
+                st.success("当前班表已锁定并发布，预览者现在可以直接查看。")
 
 
 def render_viewer_mode():
     st.markdown('<p class="cmf-intro">只读查阅已排好的生产班表，按姓名定位个人任务，并导出便于传阅的 PDF。</p>', unsafe_allow_html=True)
-    st.subheader("上传已排班文件")
-    st.caption("支持现有生产排班 Excel 模板；原文件不会被修改。")
-    uploaded = st.file_uploader("上传已排好的生产排班 Excel", type=["xlsx"], label_visibility="collapsed", key="viewer_upload")
-    if uploaded is None:
-        st.info("等待上传已排好的生产排班 Excel。")
+    store = locked_schedule_store()
+
+    if creator_access:
+        with st.expander("发布已有排班 Excel", expanded=not bool(store)):
+            st.caption("上传现有生产排班模板，确认预览无误后可锁定为所有预览者看到的版本。")
+            uploaded = st.file_uploader("上传已排好的生产排班 Excel", type=["xlsx"], label_visibility="collapsed", key="viewer_upload")
+            if uploaded is not None:
+                try:
+                    candidate = load_schedule_workbook(uploaded.getvalue())
+                    candidate_sheet_name = st.selectbox("待发布工作表", candidate.schedule_sheets, key="candidate_sheet")
+                    if st.button("锁定并发布这个排班", type="primary", key="publish_uploaded"):
+                        store.clear()
+                        store.update({
+                            "kind": "workbook",
+                            "name": uploaded.name,
+                            "bytes": uploaded.getvalue(),
+                            "sheet": candidate_sheet_name,
+                            "locked_by": current_username,
+                            "locked_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        })
+                        st.success("排班已锁定并发布。")
+                        st.rerun()
+                except Exception as exc:
+                    st.error(f"无法读取排班文件：{exc}")
+
+    if not store:
+        st.info("当前还没有创建者锁定并发布的排班，请稍后再查看。")
         return
-    try:
-        file_bytes = uploaded.getvalue()
-        schedule = load_schedule_workbook(file_bytes)
-    except Exception as exc:
-        st.error(f"无法读取排班文件：{exc}")
-        return
 
-    sheet_col, person_col = st.columns([1, 1])
-    with sheet_col:
-        selected_sheet = st.selectbox("排班工作表", schedule.schedule_sheets)
-    sheet = schedule.workbook[selected_sheet]
-    people = available_people(sheet)
-    with person_col:
-        selected_person = st.selectbox("人员定位", [""] + people, format_func=lambda value: value or "全部人员（不高亮）")
+    st.subheader("已发布班次")
+    st.caption(f"{store.get('name')} · 发布人 {store.get('locked_by')} · 发布时间 {store.get('locked_at')}")
 
-    matches = matching_records(sheet, selected_person)
-    c1, c2, c3 = st.columns(3)
-    c1.metric("排班工作表", selected_sheet)
-    c2.metric("识别人员", len(people))
-    c3.metric("个人相关任务", len(matches) if selected_person else "—")
-
-    st.markdown("#### 排班预览")
-    if selected_person:
-        st.caption(f"已用黄色标记 {selected_person} 涉及的日期、时间、工作内容和人员安排。")
+    if store.get("kind") == "workbook":
+        try:
+            schedule = load_schedule_workbook(store["bytes"])
+            selected_sheet = store.get("sheet") if store.get("sheet") in schedule.schedule_sheets else schedule.schedule_sheets[0]
+            sheet = schedule.workbook[selected_sheet]
+        except Exception as exc:
+            st.error(f"已发布排班无法读取：{exc}")
+            return
+        people = available_people(sheet)
+        selected_person = st.selectbox("人员定位", [""] + people, format_func=lambda value: value or "全部人员（不高亮）", key="published_person")
+        matches = matching_records(sheet, selected_person)
+        st.markdown("#### 排班预览")
+        if selected_person:
+            st.caption("黄色整行表示本人参与；蓝色日期表示本人担任现场负责人。未参与的同日工序不会高亮。")
+        st.markdown(render_schedule_html(sheet, selected_person), unsafe_allow_html=True)
+        try:
+            pdf_bytes = export_schedule_pdf(sheet, selected_person)
+            filename_suffix = f"-{selected_person}" if selected_person else ""
+            st.download_button("导出单页排班 PDF", data=pdf_bytes, file_name=f"{selected_sheet}{filename_suffix}-排班预览.pdf", mime="application/pdf", type="primary")
+        except Exception as exc:
+            st.error(f"PDF 生成失败：{exc}")
     else:
-        st.caption("表格保持原排班模板的五列结构和主要配色；可横向或纵向滚动查阅。")
-    st.markdown(render_schedule_html(sheet, selected_person), unsafe_allow_html=True)
-
-    if selected_person:
-        st.markdown("#### 个人班次清单")
-        if matches:
-            personal_rows = [
-                {
-                    "日期": item["日期"],
-                    "时间": item["时间"],
-                    "具体工作": item["工作内容"],
-                    "角色": "现场负责人" if selected_person in item["现场负责人"] else "人员安排",
-                }
-                for item in matches
-            ]
-            st.dataframe(personal_rows, use_container_width=True, hide_index=True, height=min(420, 44 + len(personal_rows) * 35))
-        else:
-            st.info("未找到该人员的相关班次。")
-
-    try:
-        pdf_bytes = export_schedule_pdf(sheet, selected_person)
-        filename_suffix = f"-{selected_person}" if selected_person else ""
-        download_col, _ = st.columns([1, 3])
-        with download_col:
-            st.download_button(
-                "导出排班 PDF",
-                data=pdf_bytes,
-                file_name=f"{selected_sheet}{filename_suffix}-排班预览.pdf",
-                mime="application/pdf",
-                type="primary",
-                use_container_width=True,
-            )
-    except Exception as exc:
-        st.error(f"PDF 生成失败：{exc}")
+        records = store.get("records", [])
+        people = people_from_records(records)
+        selected_person = st.selectbox("人员定位", [""] + people, format_func=lambda value: value or "全部人员（不高亮）", key="generated_person")
+        st.markdown("#### 排班预览")
+        if selected_person:
+            st.caption("黄色整行表示本人参与；蓝色日期表示本人担任现场负责人。未参与的同日工序不会高亮。")
+        st.markdown(render_records_html(records, selected_person), unsafe_allow_html=True)
+        try:
+            pdf_bytes = export_records_pdf(records, store.get("name", "排班结果"), selected_person)
+            filename_suffix = f"-{selected_person}" if selected_person else ""
+            download_pdf, download_excel, _ = st.columns([1, 1, 2])
+            with download_pdf:
+                st.download_button("导出单页排班 PDF", data=pdf_bytes, file_name=f"排班结果{filename_suffix}.pdf", mime="application/pdf", type="primary", use_container_width=True)
+            with download_excel:
+                st.download_button("下载排班 Excel", data=store.get("excel", b""), file_name="排班结果.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        except Exception as exc:
+            st.error(f"PDF 生成失败：{exc}")
 
 
 if mode == "排班创建者":
