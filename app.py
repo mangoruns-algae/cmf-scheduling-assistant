@@ -22,6 +22,8 @@ from scheduler import generate_schedule
 
 st.set_page_config(page_title="CMF 排班助手", page_icon="🤖", layout="wide")
 
+APP_VERSION = "0.2.0"
+APP_UPDATED_AT = "2026.08.24"
 
 COLUMN_LABELS = {
     "employee_id": "员工编号",
@@ -84,9 +86,9 @@ def table_height(frame, maximum=520):
 
 def render_footer():
     st.markdown(
-        """
+        f"""
         <div class="cmf-footer">
-            版本 0.1&nbsp;&nbsp;·&nbsp;&nbsp;更新日期 2026.08.21&nbsp;&nbsp;·&nbsp;&nbsp;Powered by Qingyuan
+            版本 {APP_VERSION}&nbsp;&nbsp;·&nbsp;&nbsp;更新日期 {APP_UPDATED_AT}&nbsp;&nbsp;·&nbsp;&nbsp;Powered by Qingyuan
         </div>
         """,
         unsafe_allow_html=True,
