@@ -5,6 +5,7 @@ import io
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
+from pathlib import Path
 
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
@@ -21,6 +22,10 @@ NAME_EXCLUSIONS = {
     "早班", "中班", "晚班", "休息", "培训", "确认", "复核", "其他", "生产", "设备",
     "冻干机", "外壁洗", "洗烘", "灌装", "包装", "提前出", "待确认",
 }
+COMMON_SURNAMES = set(
+    "赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华金魏陶姜戚谢邹喻柏水窦章云苏潘葛奚范彭郎鲁韦昌马苗凤花方俞任袁柳鲍史唐费廉岑薛雷贺倪汤滕殷罗毕郝邬安常乐于时傅皮卞齐康伍余元顾孟平黄和穆萧尹姚邵湛汪祁毛禹狄米贝明臧计伏成戴谈宋茅庞熊纪舒屈项祝董梁杜阮蓝闵席季麻强贾路娄危江童颜郭梅盛林刁钟徐邱骆高夏蔡田樊胡凌霍虞万支柯管卢莫房裘缪干解应宗丁宣贲邓郁单杭洪包诸左石崔吉龚程嵇邢裴陆荣翁荀羊惠甄曲封芮羿储靳汲邴糜松井段富巫乌焦巴弓牧隗山谷车侯宓蓬全郗班仰秋仲伊宫宁仇栾暴甘厉戎祖武符刘景詹束龙叶幸司韶郜黎蓟薄印宿白怀蒲邰从鄂索咸籍赖卓蔺屠蒙池乔阴胥能苍双闻莘党翟谭贡劳逄姬申扶堵冉宰郦雍却璩桑桂濮牛寿通边扈燕冀郏浦尚农温别庄晏柴瞿阎充慕连茹习宦艾鱼容向古易慎戈廖庾终暨居衡步都耿满弘匡国文寇广禄阙东欧殳沃利蔚越夔隆师巩厍聂晁勾敖融冷訾辛阚那简饶空曾毋沙乜养鞠须丰巢关蒯相查后荆红游竺权逯盖益桓公"
+)
+COMMON_SURNAMES.update("覃")
 
 
 @dataclass
@@ -70,6 +75,47 @@ def _display_value(value):
     return str(value)
 
 
+def _split_joined_chinese_names(token):
+    """Split a punctuation-free Chinese name run using surname boundaries."""
+    if not re.fullmatch(r"[\u4e00-\u9fff]+", token) or len(token) <= 3:
+        return [token]
+    if len(token) == 4 and token[0] in COMMON_SURNAMES and token[2] in COMMON_SURNAMES:
+        return [token[:2], token[2:]]
+    if len(token) == 4:
+        return [token]
+    size = len(token)
+    best = [None] * (size + 1)
+    best[0] = []
+    for start in range(size):
+        if best[start] is None or token[start] not in COMMON_SURNAMES:
+            continue
+        for length in (3, 2, 4):
+            end = start + length
+            if end <= size and (end == size or token[end] in COMMON_SURNAMES):
+                candidate = best[start] + [token[start:end]]
+                if best[end] is None or abs(length - 3) + len(candidate) < len(best[end]) + 1:
+                    best[end] = candidate
+    return best[size] or [token]
+
+
+def normalize_people_text(value):
+    """Normalize separators and split clearly concatenated Chinese names."""
+    text = _display_value(value).strip()
+    if not text:
+        return ""
+    parts = re.split(r"[、，,；;\/\n\t]+", text)
+    normalized = []
+    for part in parts:
+        part = re.sub(r"\s+", " ", part).strip(" 、，,；;")
+        if not part:
+            continue
+        if re.fullmatch(r"[\u4e00-\u9fff]+", part):
+            normalized.extend(_split_joined_chinese_names(part))
+        else:
+            normalized.append(part)
+    return "、".join(dict.fromkeys(normalized))
+
+
 def _merged_value(sheet, row, col):
     cell = sheet.cell(row, col)
     if not isinstance(cell, MergedCell):
@@ -85,6 +131,8 @@ def schedule_records(sheet):
     records = []
     for row in range(header_row + 1, last_row + 1):
         values = [_merged_value(sheet, row, first_col + offset).strip() for offset in range(5)]
+        values[3] = normalize_people_text(values[3])
+        values[4] = normalize_people_text(values[4])
         if any(values):
             records.append({"row": row, **dict(zip(SCHEDULE_HEADERS, values))})
     return records
@@ -170,44 +218,132 @@ def render_records_html(records, selected_person=""):
     """
 
 
+def _pdf_fonts():
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    registered = set(pdfmetrics.getRegisteredFontNames())
+    chinese_name = "MicrosoftYaHei"
+    english_name = "Arial"
+    if chinese_name not in registered:
+        chinese_paths = [
+            Path("C:/Windows/Fonts/msyh.ttc"),
+            Path("/usr/share/fonts/truetype/msttcorefonts/msyh.ttf"),
+        ]
+        for path in chinese_paths:
+            if path.exists():
+                try:
+                    pdfmetrics.registerFont(TTFont(chinese_name, str(path)))
+                    break
+                except Exception:
+                    continue
+        else:
+            chinese_name = "STSong-Light"
+            if chinese_name not in registered:
+                pdfmetrics.registerFont(UnicodeCIDFont(chinese_name))
+    if english_name not in registered:
+        arial_paths = [Path("C:/Windows/Fonts/arial.ttf"), Path("/usr/share/fonts/truetype/msttcorefonts/Arial.ttf")]
+        for path in arial_paths:
+            if path.exists():
+                try:
+                    pdfmetrics.registerFont(TTFont(english_name, str(path)))
+                    break
+                except Exception:
+                    continue
+        else:
+            english_name = "Helvetica"
+    return chinese_name, english_name
+
+
+def _pdf_markup(value, chinese_font, english_font):
+    rendered_lines = []
+    for line in str(value or "").splitlines() or [""]:
+        escaped = html.escape(line)
+        rendered_lines.append(re.sub(
+            r"([A-Za-z0-9][A-Za-z0-9 ._+:/()%-]*)",
+            lambda match: f'<font name="{english_font}">{match.group(1)}</font>',
+            escaped,
+        ))
+    return "<br/>".join(rendered_lines)
+
+
+def _pdf_layout(records, available_width):
+    row_count = max(1, len(records))
+    if row_count <= 24:
+        font_size = 8.5
+    elif row_count <= 40:
+        font_size = 7.2
+    elif row_count <= 60:
+        font_size = 5.8
+    elif row_count <= 80:
+        font_size = 4.8
+    else:
+        font_size = 4.2
+    leading = font_size * 1.18
+    padding = max(0.8, min(2.8, 56 / row_count))
+
+    def visual_length(value):
+        return sum(2 if "\u4e00" <= char <= "\u9fff" else 1 for char in str(value or ""))
+
+    maxima = []
+    for label in SCHEDULE_HEADERS:
+        lengths = [visual_length(label)] + [visual_length(record.get(label, "")) for record in records]
+        maxima.append(min(max(lengths), 60))
+    minimums = [52, 54, 142, 62, 92]
+    remaining = max(0, available_width - sum(minimums))
+    pressures = [maxima[0] * 0.5, maxima[1] * 0.7, maxima[2] * 1.8, maxima[3], maxima[4] * 1.4]
+    pressure_total = sum(pressures) or 1
+    widths = [minimum + remaining * pressure / pressure_total for minimum, pressure in zip(minimums, pressures)]
+    return widths, font_size, leading, padding
+
+
 def export_records_pdf(records, title, selected_person=""):
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER, TA_LEFT
-    from reportlab.lib.pagesizes import A3, landscape
-    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.units import mm
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
     from reportlab.platypus import KeepInFrame, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    chinese_font, english_font = _pdf_fonts()
     buffer = io.BytesIO()
-    document = SimpleDocTemplate(buffer, pagesize=landscape(A3), rightMargin=10 * mm, leftMargin=10 * mm, topMargin=10 * mm, bottomMargin=10 * mm, title=title)
-    styles = getSampleStyleSheet()
-    body = ParagraphStyle("GeneratedBody", parent=styles["BodyText"], fontName="STSong-Light", fontSize=7.5, leading=10, alignment=TA_LEFT)
-    center = ParagraphStyle("GeneratedCenter", parent=body, alignment=TA_CENTER)
-    heading = ParagraphStyle("GeneratedTitle", parent=styles["Title"], fontName="STSong-Light", fontSize=16, leading=20, textColor=colors.HexColor("#17365D"))
-    story = [Paragraph(html.escape(title), heading), Spacer(1, 3 * mm)]
+    document = SimpleDocTemplate(
+        buffer, pagesize=A4, rightMargin=8 * mm, leftMargin=8 * mm, topMargin=8 * mm, bottomMargin=8 * mm, title=title
+    )
+    widths, font_size, leading, padding = _pdf_layout(records, document.width)
+    body = ParagraphStyle("PdfBody", fontName=chinese_font, fontSize=font_size, leading=leading, alignment=TA_LEFT, wordWrap="CJK")
+    center = ParagraphStyle("PdfCenter", parent=body, alignment=TA_CENTER)
+    heading = ParagraphStyle("PdfTitle", fontName=chinese_font, fontSize=max(11, font_size + 5), leading=max(14, leading + 5), alignment=TA_CENTER, textColor=colors.HexColor("#17365D"))
+    content = [Paragraph(_pdf_markup(title, chinese_font, english_font), heading), Spacer(1, 2 * mm)]
     if selected_person:
-        story.extend([Paragraph(f"人员定位：{html.escape(selected_person)}（黄色为参与班次，蓝色日期为现场负责人）", body), Spacer(1, 2 * mm)])
-    data = [[Paragraph(label, center) for label in SCHEDULE_HEADERS]]
+        note = f"人员定位：{selected_person}（黄色为参与班次，蓝色日期为现场负责人）"
+        content.extend([Paragraph(_pdf_markup(note, chinese_font, english_font), body), Spacer(1, 1.5 * mm)])
+    data = [[Paragraph(_pdf_markup(label, chinese_font, english_font), center) for label in SCHEDULE_HEADERS]]
     for record in records:
-        data.append([Paragraph(html.escape(str(record.get(label, ""))), center if label != "工作内容" else body) for label in SCHEDULE_HEADERS])
-    table = Table(data, colWidths=[31 * mm, 33 * mm, 133 * mm, 39 * mm, 150 * mm], repeatRows=1)
+        data.append([
+            Paragraph(_pdf_markup(record.get(label, ""), chinese_font, english_font), body if label == "工作内容" else center)
+            for label in SCHEDULE_HEADERS
+        ])
+    table = Table(data, colWidths=widths, repeatRows=1)
     commands = [
-        ("FONTNAME", (0, 0), (-1, -1), "STSong-Light"), ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#AEB8C6")),
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D9EAF7")), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#AEB8C6")),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D9EAF7")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#17365D")),
+        ("ALIGN", (0, 0), (1, -1), "CENTER"), ("ALIGN", (3, 0), (4, -1), "CENTER"),
+        ("ALIGN", (2, 1), (2, -1), "LEFT"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), padding), ("BOTTOMPADDING", (0, 0), (-1, -1), padding),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2), ("RIGHTPADDING", (0, 0), (-1, -1), 2),
     ]
     for index, record in enumerate(records, start=1):
         match_type = _record_match_type(record, selected_person)
         if match_type == "participant":
-            commands.extend([("BACKGROUND", (0, index), (-1, index), colors.HexColor("#FFF2B2")), ("BOX", (0, index), (-1, index), 1, colors.HexColor("#E0A800"))])
+            commands.extend([("BACKGROUND", (0, index), (-1, index), colors.HexColor("#FFF2B2")), ("BOX", (0, index), (-1, index), 0.8, colors.HexColor("#E0A800"))])
         elif match_type == "leader":
-            commands.extend([("BACKGROUND", (0, index), (0, index), colors.HexColor("#DCEBFF")), ("BOX", (0, index), (0, index), 1, colors.HexColor("#2F6FED"))])
+            commands.extend([("BACKGROUND", (0, index), (0, index), colors.HexColor("#DCEBFF")), ("BOX", (0, index), (0, index), 0.8, colors.HexColor("#2F6FED"))])
     table.setStyle(TableStyle(commands))
-    story.append(KeepInFrame(document.width, document.height - 28 * mm, [table], mode="shrink"))
-    document.build(story)
+    content.append(table)
+    document.build([KeepInFrame(document.width, document.height, content, mode="shrink")])
     return buffer.getvalue()
 
 
@@ -234,6 +370,11 @@ def _color_rgb(color, fallback):
 
 
 def render_schedule_html(sheet, selected_person=""):
+    # The viewer uses normalized records instead of source cell formatting so
+    # every uploaded workbook gets consistent spacing, alignment and wrapping.
+    return render_records_html(schedule_records(sheet), selected_person)
+
+    # Legacy source-style renderer retained below for compatibility reference.
     header_row, first_col, last_col, last_row = sheet_layout(sheet)
     records_by_row = {record["row"]: record for record in schedule_records(sheet)}
     # A selected-person view deliberately expands merged cells. This prevents a
@@ -310,82 +451,5 @@ def render_schedule_html(sheet, selected_person=""):
 
 
 def export_schedule_pdf(sheet, selected_person=""):
-    from reportlab.lib import colors
-    from reportlab.lib.enums import TA_CENTER, TA_LEFT
-    from reportlab.lib.pagesizes import A3, landscape
-    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-    from reportlab.lib.units import mm
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-    from reportlab.platypus import KeepInFrame, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-
-    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
-    buffer = io.BytesIO()
-    document = SimpleDocTemplate(
-        buffer,
-        pagesize=landscape(A3),
-        rightMargin=10 * mm,
-        leftMargin=10 * mm,
-        topMargin=10 * mm,
-        bottomMargin=10 * mm,
-        title=f"{sheet.title} 生产排班",
-    )
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        "ChineseTitle", parent=styles["Title"], fontName="STSong-Light", fontSize=16, leading=21, textColor=colors.HexColor("#17365D")
-    )
-    body_style = ParagraphStyle(
-        "ChineseBody", parent=styles["BodyText"], fontName="STSong-Light", fontSize=7.5, leading=10, alignment=TA_LEFT
-    )
-    center_style = ParagraphStyle(
-        "ChineseCenter", parent=body_style, alignment=TA_CENTER
-    )
-    story = [Paragraph(html.escape(str(sheet.cell(2, 2).value or f"{sheet.title} 生产排班")), title_style), Spacer(1, 4 * mm)]
-    if selected_person:
-        story.extend([
-            Paragraph(f"人员定位：{html.escape(selected_person)}（黄色行为该人员相关班次）", body_style),
-            Spacer(1, 3 * mm),
-        ])
-
-    header_row, first_col, last_col, last_row = sheet_layout(sheet)
-    records_by_row = {record["row"]: record for record in schedule_records(sheet)}
-    table_data = []
-    for row in range(header_row, last_row + 1):
-        rendered = []
-        for col in range(first_col, last_col + 1):
-            value = _merged_value(sheet, row, col)
-            rendered.append(Paragraph(html.escape(value).replace("\n", "<br/>"), center_style if col != first_col + 2 else body_style))
-        table_data.append(rendered)
-
-    table = Table(table_data, colWidths=[31 * mm, 33 * mm, 133 * mm, 39 * mm, 150 * mm], repeatRows=1)
-    commands = [
-        ("FONTNAME", (0, 0), (-1, -1), "STSong-Light"),
-        ("FONTSIZE", (0, 0), (-1, -1), 7.5),
-        ("LEADING", (0, 0), (-1, -1), 10),
-        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#AEB8C6")),
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D9EAF7")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#17365D")),
-        ("ALIGN", (0, 0), (-1, 0), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-    ]
-    for source_row, record in records_by_row.items():
-        table_row = source_row - header_row
-        match_type = _record_match_type(record, selected_person)
-        if match_type == "participant":
-            commands.extend([
-                ("BACKGROUND", (0, table_row), (-1, table_row), colors.HexColor("#FFF2B2")),
-                ("BOX", (0, table_row), (-1, table_row), 1.0, colors.HexColor("#E0A800")),
-            ])
-        elif match_type == "leader":
-            commands.extend([
-                ("BACKGROUND", (0, table_row), (0, table_row), colors.HexColor("#DCEBFF")),
-                ("BOX", (0, table_row), (0, table_row), 1.0, colors.HexColor("#2F6FED")),
-            ])
-    table.setStyle(TableStyle(commands))
-    # KeepInFrame guarantees that even long schedules remain a single-page PDF.
-    story.append(KeepInFrame(document.width, document.height - 32 * mm, [table], mode="shrink"))
-
-    document.build(story)
-    return buffer.getvalue()
+    title = str(sheet.cell(2, 2).value or f"{sheet.title} 生产排班")
+    return export_records_pdf(schedule_records(sheet), title, selected_person)
