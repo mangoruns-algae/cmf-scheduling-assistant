@@ -24,7 +24,7 @@ from scheduler import generate_schedule
 
 st.set_page_config(page_title="CMF 排班助手", page_icon="🤖", layout="wide")
 
-APP_VERSION = "0.2.3"
+APP_VERSION = "0.2.4"
 APP_UPDATED_AT = "2026.08.24"
 
 COLUMN_LABELS = {

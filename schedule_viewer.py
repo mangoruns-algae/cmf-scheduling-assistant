@@ -300,50 +300,144 @@ def _pdf_layout(records, available_width):
 
 def export_records_pdf(records, title, selected_person=""):
     from reportlab.lib import colors
-    from reportlab.lib.enums import TA_CENTER, TA_LEFT
     from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.units import mm
-    from reportlab.platypus import KeepInFrame, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfgen import canvas
 
     chinese_font, english_font = _pdf_fonts()
     buffer = io.BytesIO()
-    document = SimpleDocTemplate(
-        buffer, pagesize=A4, rightMargin=8 * mm, leftMargin=8 * mm, topMargin=8 * mm, bottomMargin=8 * mm, title=title
-    )
-    widths, font_size, leading, padding = _pdf_layout(records, document.width)
-    body = ParagraphStyle("PdfBody", fontName=chinese_font, fontSize=font_size, leading=leading, alignment=TA_LEFT, wordWrap="CJK")
-    center = ParagraphStyle("PdfCenter", parent=body, alignment=TA_CENTER)
-    heading = ParagraphStyle("PdfTitle", fontName=chinese_font, fontSize=max(11, font_size + 5), leading=max(14, leading + 5), alignment=TA_CENTER, textColor=colors.HexColor("#17365D"))
-    content = [Paragraph(_pdf_markup(title, chinese_font, english_font), heading), Spacer(1, 2 * mm)]
+    page_width, page_height = A4
+    margin_x = 7 * mm
+    margin_y = 7 * mm
+    table_width = page_width - margin_x * 2
+    title_height = 17
+    note_height = 10 if selected_person else 0
+    gap_height = 6
+    available_table_height = page_height - margin_y * 2 - title_height - note_height - gap_height
+    widths, initial_size, _, _ = _pdf_layout(records, table_width)
+
+    def font_for_char(char):
+        return chinese_font if "\u4e00" <= char <= "\u9fff" else english_font
+
+    def text_width(text, size):
+        return sum(pdfmetrics.stringWidth(char, font_for_char(char), size) for char in text)
+
+    def wrap_text(value, width, size):
+        lines = []
+        for source_line in str(value or "").splitlines() or [""]:
+            current = ""
+            current_width = 0.0
+            for char in source_line:
+                char_width = pdfmetrics.stringWidth(char, font_for_char(char), size)
+                if current and current_width + char_width > width:
+                    lines.append(current)
+                    current = char
+                    current_width = char_width
+                else:
+                    current += char
+                    current_width += char_width
+            lines.append(current)
+        return lines or [""]
+
+    def row_layouts(size):
+        leading = size * 1.15
+        padding = max(0.6, size * 0.22)
+        layouts = []
+        header_lines = [[label] for label in SCHEDULE_HEADERS]
+        layouts.append((header_lines, leading + padding * 2 + 1))
+        for record in records:
+            cell_lines = [wrap_text(record.get(label, ""), widths[index] - 4, size) for index, label in enumerate(SCHEDULE_HEADERS)]
+            height = max(len(lines) for lines in cell_lines) * leading + padding * 2
+            layouts.append((cell_lines, height))
+        return layouts, leading, padding
+
+    font_size = initial_size
+    layouts, leading, padding = row_layouts(font_size)
+    while sum(height for _, height in layouts) > available_table_height and font_size > 3.0:
+        font_size = round(font_size - 0.2, 2)
+        layouts, leading, padding = row_layouts(font_size)
+    total_height = sum(height for _, height in layouts)
+    if total_height > available_table_height:
+        ratio = available_table_height / total_height
+        layouts = [(lines, height * ratio) for lines, height in layouts]
+        leading *= ratio
+
+    pdf = canvas.Canvas(buffer, pagesize=A4, pageCompression=1)
+    pdf.setTitle(title)
+
+    def draw_mixed_line(text, x, baseline, size, align="left", max_width=None):
+        width = text_width(text, size)
+        if align == "center":
+            cursor = x - width / 2
+        elif align == "right":
+            cursor = x - width
+        else:
+            cursor = x
+        if max_width is not None and width > max_width:
+            return
+        for char in text:
+            font = font_for_char(char)
+            pdf.setFont(font, size)
+            pdf.drawString(cursor, baseline, char)
+            cursor += pdfmetrics.stringWidth(char, font, size)
+
+    pdf.setFillColor(colors.HexColor("#17365D"))
+    draw_mixed_line(title, page_width / 2, page_height - margin_y - 11, 12, align="center")
+    table_top = page_height - margin_y - title_height
     if selected_person:
+        pdf.setFillColor(colors.HexColor("#3F4B5B"))
         note = f"人员定位：{selected_person}（黄色为参与班次，蓝色日期为现场负责人）"
-        content.extend([Paragraph(_pdf_markup(note, chinese_font, english_font), body), Spacer(1, 1.5 * mm)])
-    data = [[Paragraph(_pdf_markup(label, chinese_font, english_font), center) for label in SCHEDULE_HEADERS]]
-    for record in records:
-        data.append([
-            Paragraph(_pdf_markup(record.get(label, ""), chinese_font, english_font), body if label == "工作内容" else center)
-            for label in SCHEDULE_HEADERS
-        ])
-    table = Table(data, colWidths=widths, repeatRows=1)
-    commands = [
-        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#AEB8C6")),
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D9EAF7")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#17365D")),
-        ("ALIGN", (0, 0), (1, -1), "CENTER"), ("ALIGN", (3, 0), (4, -1), "CENTER"),
-        ("ALIGN", (2, 1), (2, -1), "LEFT"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), padding), ("BOTTOMPADDING", (0, 0), (-1, -1), padding),
-        ("LEFTPADDING", (0, 0), (-1, -1), 2), ("RIGHTPADDING", (0, 0), (-1, -1), 2),
-    ]
-    for index, record in enumerate(records, start=1):
-        match_type = _record_match_type(record, selected_person)
-        if match_type == "participant":
-            commands.extend([("BACKGROUND", (0, index), (-1, index), colors.HexColor("#FFF2B2")), ("BOX", (0, index), (-1, index), 0.8, colors.HexColor("#E0A800"))])
+        draw_mixed_line(note, margin_x, table_top - 7, 5.5)
+        table_top -= note_height
+
+    y = table_top
+    all_rows = [{label: label for label in SCHEDULE_HEADERS}] + records
+    for row_index, (record, (cell_lines, row_height)) in enumerate(zip(all_rows, layouts)):
+        y -= row_height
+        match_type = "" if row_index == 0 else _record_match_type(record, selected_person)
+        if row_index == 0:
+            pdf.setFillColor(colors.HexColor("#D9EAF7"))
+            pdf.rect(margin_x, y, table_width, row_height, fill=1, stroke=0)
+        elif match_type == "participant":
+            pdf.setFillColor(colors.HexColor("#FFF2B2"))
+            pdf.rect(margin_x, y, table_width, row_height, fill=1, stroke=0)
         elif match_type == "leader":
-            commands.extend([("BACKGROUND", (0, index), (0, index), colors.HexColor("#DCEBFF")), ("BOX", (0, index), (0, index), 0.8, colors.HexColor("#2F6FED"))])
-    table.setStyle(TableStyle(commands))
-    content.append(table)
-    document.build([KeepInFrame(document.width, document.height, content, mode="shrink")])
+            pdf.setFillColor(colors.HexColor("#DCEBFF"))
+            pdf.rect(margin_x, y, widths[0], row_height, fill=1, stroke=0)
+
+        x = margin_x
+        for column_index, (width, lines) in enumerate(zip(widths, cell_lines)):
+            pdf.saveState()
+            clip = pdf.beginPath()
+            clip.rect(x + 0.5, y + 0.5, width - 1, row_height - 1)
+            pdf.clipPath(clip, stroke=0, fill=0)
+            text_block_height = len(lines) * leading
+            baseline = y + (row_height + text_block_height) / 2 - leading + (leading - font_size) / 2
+            pdf.setFillColor(colors.HexColor("#17365D") if row_index == 0 else colors.HexColor("#263142"))
+            for line in lines:
+                if column_index == 2:
+                    draw_mixed_line(line, x + 2, baseline, font_size, align="left", max_width=width - 4)
+                else:
+                    draw_mixed_line(line, x + width / 2, baseline, font_size, align="center", max_width=width - 4)
+                baseline -= leading
+            pdf.restoreState()
+            x += width
+
+        pdf.setStrokeColor(colors.HexColor("#AEB8C6"))
+        pdf.setLineWidth(0.25)
+        pdf.line(margin_x, y, margin_x + table_width, y)
+
+    pdf.setStrokeColor(colors.HexColor("#AEB8C6"))
+    pdf.setLineWidth(0.3)
+    x = margin_x
+    pdf.line(margin_x, table_top, margin_x + table_width, table_top)
+    for width in [0] + widths:
+        pdf.line(x, y, x, table_top)
+        x += width
+    pdf.line(margin_x + table_width, y, margin_x + table_width, table_top)
+    pdf.showPage()
+    pdf.save()
     return buffer.getvalue()
 
 
