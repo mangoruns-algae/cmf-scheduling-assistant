@@ -26,7 +26,7 @@ from supabase_store import SupabaseScheduleStore, SupabaseStoreError
 
 st.set_page_config(page_title="CMF 排班助手", page_icon="🤖", layout="wide")
 
-APP_VERSION = "0.2.6"
+APP_VERSION = "0.2.7"
 APP_UPDATED_AT = "2026.08.25"
 
 COLUMN_LABELS = {
@@ -502,7 +502,9 @@ def render_creator_mode():
                     st.error("尚未配置 Supabase，排班没有发布。请先在 Streamlit Secrets 中填写 SUPABASE_URL、SUPABASE_KEY 和 SUPABASE_BUCKET。")
                 else:
                     try:
-                        storage_path = f"generated/{item_id}-排班结果.xlsx"
+                        # Supabase Storage object keys should stay ASCII-only.  The
+                        # original Chinese filename is preserved in file_name.
+                        storage_path = f"generated/{item_id}.xlsx"
                         start_date, end_date = schedule_dates(item["name"], records)
                         cloud.upload_file(storage_path, output_bytes)
                         cloud.upsert_schedule({
@@ -553,7 +555,9 @@ def render_viewer_mode():
                         cloud = supabase_store()
                         if cloud is None:
                             raise RuntimeError("尚未配置 Supabase Secrets，文件未保存。")
-                        storage_path = f"workbooks/{item_id}-{uploaded.name}"
+                        # Keep user-facing names in metadata while using a stable,
+                        # ASCII-only object key accepted by Supabase Storage.
+                        storage_path = f"workbooks/{item_id}.xlsx"
                         start_date, end_date = schedule_dates(uploaded.name, records)
                         cloud.upload_file(storage_path, file_bytes)
                         cloud.upsert_schedule({
