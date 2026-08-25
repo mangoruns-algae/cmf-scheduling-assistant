@@ -26,7 +26,7 @@ from supabase_store import SupabaseScheduleStore, SupabaseStoreError
 
 st.set_page_config(page_title="CMF 排班助手", page_icon="🤖", layout="wide")
 
-APP_VERSION = "0.2.5"
+APP_VERSION = "0.2.6"
 APP_UPDATED_AT = "2026.08.25"
 
 COLUMN_LABELS = {
@@ -76,9 +76,10 @@ def locked_schedule_store():
 
 
 def supabase_store():
-    url = str(st.secrets.get("SUPABASE_URL", "")).strip()
-    key = str(st.secrets.get("SUPABASE_KEY", "")).strip()
-    bucket = str(st.secrets.get("SUPABASE_BUCKET", "schedule-files")).strip()
+    config = st.secrets.get("supabase", {})
+    url = str(config.get("url", st.secrets.get("SUPABASE_URL", ""))).strip()
+    key = str(config.get("key", st.secrets.get("SUPABASE_KEY", ""))).strip()
+    bucket = str(config.get("bucket", st.secrets.get("SUPABASE_BUCKET", "schedule-files"))).strip()
     if not url or not key:
         return None
     return SupabaseScheduleStore(url, key, bucket)
@@ -520,6 +521,8 @@ def render_creator_mode():
 
 def render_viewer_mode():
     st.markdown('<p class="cmf-intro">在排班看板中集中查阅多份生产班表，按姓名定位个人任务，并导出便于传阅的 PDF。</p>', unsafe_allow_html=True)
+    if st.session_state.pop("board_upload_success", False):
+        st.success("排班已永久保存到 Supabase，并加入排班看板。")
     try:
         items, using_supabase = persistent_board_items()
     except Exception as exc:
@@ -546,8 +549,7 @@ def render_viewer_mode():
                         sheet_name = candidate.schedule_sheets[0]
                         records = schedule_records(candidate.workbook[sheet_name])
                         item_id = hashlib.sha256(file_bytes).hexdigest()[:12]
-                        if not any(item.get("file_hash") == item_id for item in items.values()):
-                            added += 1
+                        is_new_file = not any(item.get("file_hash") == item_id for item in items.values())
                         cloud = supabase_store()
                         if cloud is None:
                             raise RuntimeError("尚未配置 Supabase Secrets，文件未保存。")
@@ -562,6 +564,8 @@ def render_viewer_mode():
                             "status": "published", "file_hash": item_id,
                             "source_type": "workbook", "records": None,
                         })
+                        if is_new_file:
+                            added += 1
                     except Exception as exc:
                         errors.append(f"{uploaded.name}：{exc}")
                 if added:
@@ -570,8 +574,10 @@ def render_viewer_mode():
                     st.info("所选文件已在看板中，没有重复添加。")
                 for error in errors:
                     st.error(error)
-                fetch_supabase_schedules.clear()
-                st.rerun()
+                if added and not errors:
+                    fetch_supabase_schedules.clear()
+                    st.session_state["board_upload_success"] = True
+                    st.rerun()
 
     st.subheader("已排班看板")
     if not items:
