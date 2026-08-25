@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -20,12 +21,13 @@ from schedule_viewer import (
     schedule_records,
 )
 from scheduler import generate_schedule
+from supabase_store import SupabaseScheduleStore, SupabaseStoreError
 
 
 st.set_page_config(page_title="CMF 排班助手", page_icon="🤖", layout="wide")
 
-APP_VERSION = "0.2.4"
-APP_UPDATED_AT = "2026.08.24"
+APP_VERSION = "0.2.5"
+APP_UPDATED_AT = "2026.08.25"
 
 COLUMN_LABELS = {
     "employee_id": "员工编号",
@@ -71,6 +73,56 @@ CREATOR_USERS = {"qingyuan_qin", "admin"}
 def locked_schedule_store():
     """Process-wide temporary board shared by all active Streamlit sessions."""
     return {"items": {}}
+
+
+def supabase_store():
+    url = str(st.secrets.get("SUPABASE_URL", "")).strip()
+    key = str(st.secrets.get("SUPABASE_KEY", "")).strip()
+    bucket = str(st.secrets.get("SUPABASE_BUCKET", "schedule-files")).strip()
+    if not url or not key:
+        return None
+    return SupabaseScheduleStore(url, key, bucket)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_supabase_schedules(url, key, bucket):
+    return SupabaseScheduleStore(url, key, bucket).list_schedules()
+
+
+def persistent_board_items():
+    store = supabase_store()
+    if store is None:
+        return board_items(), False
+    rows = fetch_supabase_schedules(store.url, store.key, store.bucket)
+    items = {}
+    for row in rows:
+        start_date = row.get("start_date") or ""
+        end_date = row.get("end_date") or ""
+        date_range = f"{start_date} 至 {end_date}" if start_date or end_date else "无日期"
+        items[str(row["id"])] = {
+            "database_id": str(row["id"]),
+            "kind": row.get("source_type") or "workbook",
+            "name": row.get("file_name") or "未命名排班",
+            "storage_path": row.get("storage_path"),
+            "sheet": row.get("sheet_name"),
+            "locked_by": row.get("uploaded_by") or "未知账户",
+            "locked_at": str(row.get("created_at") or "")[:16].replace("T", " "),
+            "task_count": row.get("task_count") or 0,
+            "date_range": date_range,
+            "records": row.get("records") or [],
+            "file_hash": row.get("file_hash") or "",
+        }
+    return items, True
+
+
+def schedule_dates(file_name, records):
+    match = re.search(r"(\d{4})\.(\d{2})\.(\d{2})-(\d{4})\.(\d{2})\.(\d{2})", file_name)
+    if match:
+        values = match.groups()
+        return f"{values[0]}-{values[1]}-{values[2]}", f"{values[3]}-{values[4]}-{values[5]}"
+    dates = [record.get("日期", "") for record in records]
+    iso_dates = [date for date in dates if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date)]
+    return (iso_dates[0], iso_dates[-1]) if iso_dates else (None, None)
 
 
 def board_items():
@@ -321,11 +373,15 @@ with st.sidebar:
     st.markdown("✅ PDF 导出")
     st.markdown("✅ 个人班次定位")
     st.markdown("✅ 创建与发布排班" if creator_access else "🔒 创建与发布排班")
-    current_board_items = board_items()
+    try:
+        current_board_items, using_supabase = persistent_board_items()
+    except Exception:
+        current_board_items, using_supabase = {}, bool(supabase_store())
     if current_board_items:
         st.caption(f"看板暂存：{len(current_board_items)} 份排班")
     else:
         st.caption("当前看板暂无排班")
+    st.caption("☁️ Supabase 永久存储" if using_supabase else "⚠️ Streamlit 临时存储")
     st.divider()
     if st.button("退出登录", use_container_width=True):
         st.session_state.clear()
@@ -430,7 +486,7 @@ def render_creator_mode():
             if st.button("发布到排班看板", type="primary", use_container_width=True):
                 item_id = hashlib.sha256(output_bytes).hexdigest()[:12]
                 records = generated_schedule_records(result)
-                board_items()[item_id] = {
+                item = {
                     "kind": "generated",
                     "name": f"排班结果-{datetime.now().strftime('%Y%m%d-%H%M')}",
                     "records": records,
@@ -440,12 +496,35 @@ def render_creator_mode():
                     "task_count": len(records),
                     "date_range": f"{records[0]['日期']} 至 {records[-1]['日期']}" if records else "无日期",
                 }
-                st.success("当前班表已发布到看板，预览者现在可以直接查看。")
+                cloud = supabase_store()
+                if cloud is None:
+                    st.error("尚未配置 Supabase，排班没有发布。请先在 Streamlit Secrets 中填写 SUPABASE_URL、SUPABASE_KEY 和 SUPABASE_BUCKET。")
+                else:
+                    try:
+                        storage_path = f"generated/{item_id}-排班结果.xlsx"
+                        start_date, end_date = schedule_dates(item["name"], records)
+                        cloud.upload_file(storage_path, output_bytes)
+                        cloud.upsert_schedule({
+                            "file_name": item["name"], "storage_path": storage_path,
+                            "batch_name": item["name"], "sheet_name": "排班结果",
+                            "start_date": start_date, "end_date": end_date,
+                            "task_count": len(records), "uploaded_by": current_username,
+                            "status": "published", "file_hash": item_id,
+                            "source_type": "generated", "records": records,
+                        })
+                        fetch_supabase_schedules.clear()
+                        st.success("当前班表已永久保存到 Supabase 并发布到看板。")
+                    except Exception as exc:
+                        st.error(f"Supabase 保存失败：{exc}")
 
 
 def render_viewer_mode():
     st.markdown('<p class="cmf-intro">在排班看板中集中查阅多份生产班表，按姓名定位个人任务，并导出便于传阅的 PDF。</p>', unsafe_allow_html=True)
-    items = board_items()
+    try:
+        items, using_supabase = persistent_board_items()
+    except Exception as exc:
+        st.error(f"Supabase 连接失败：{exc}")
+        return
 
     if creator_access:
         with st.expander("批量上传排班原文件", expanded=not bool(items)):
@@ -466,20 +545,23 @@ def render_viewer_mode():
                         candidate = load_schedule_workbook(file_bytes)
                         sheet_name = candidate.schedule_sheets[0]
                         records = schedule_records(candidate.workbook[sheet_name])
-                        dates = [record["日期"] for record in records if record["日期"]]
                         item_id = hashlib.sha256(file_bytes).hexdigest()[:12]
-                        if item_id not in items:
+                        if not any(item.get("file_hash") == item_id for item in items.values()):
                             added += 1
-                        items[item_id] = {
-                            "kind": "workbook",
-                            "name": uploaded.name,
-                            "bytes": file_bytes,
-                            "sheet": sheet_name,
-                            "locked_by": current_username,
-                            "locked_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                            "task_count": len(records),
-                            "date_range": f"{dates[0]} 至 {dates[-1]}" if dates else "无日期",
-                        }
+                        cloud = supabase_store()
+                        if cloud is None:
+                            raise RuntimeError("尚未配置 Supabase Secrets，文件未保存。")
+                        storage_path = f"workbooks/{item_id}-{uploaded.name}"
+                        start_date, end_date = schedule_dates(uploaded.name, records)
+                        cloud.upload_file(storage_path, file_bytes)
+                        cloud.upsert_schedule({
+                            "file_name": uploaded.name, "storage_path": storage_path,
+                            "batch_name": sheet_name, "sheet_name": sheet_name,
+                            "start_date": start_date, "end_date": end_date,
+                            "task_count": len(records), "uploaded_by": current_username,
+                            "status": "published", "file_hash": item_id,
+                            "source_type": "workbook", "records": None,
+                        })
                     except Exception as exc:
                         errors.append(f"{uploaded.name}：{exc}")
                 if added:
@@ -488,6 +570,7 @@ def render_viewer_mode():
                     st.info("所选文件已在看板中，没有重复添加。")
                 for error in errors:
                     st.error(error)
+                fetch_supabase_schedules.clear()
                 st.rerun()
 
     st.subheader("已排班看板")
@@ -530,12 +613,25 @@ def render_viewer_mode():
     if creator_access:
         with action_col:
             if st.button("从看板移除", key=f"remove_{selected_id}", use_container_width=True):
-                del items[selected_id]
-                st.rerun()
+                try:
+                    if using_supabase:
+                        supabase_store().archive_schedule(selected_item["database_id"])
+                        fetch_supabase_schedules.clear()
+                    else:
+                        del items[selected_id]
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"归档失败：{exc}")
 
     if selected_item.get("kind") == "workbook":
         try:
-            schedule = load_schedule_workbook(selected_item["bytes"])
+            file_bytes = selected_item.get("bytes")
+            if file_bytes is None:
+                cloud = supabase_store()
+                if cloud is None:
+                    raise RuntimeError("Supabase 未配置，无法读取永久文件。")
+                file_bytes = cloud.download_file(selected_item["storage_path"])
+            schedule = load_schedule_workbook(file_bytes)
             selected_sheet = selected_item.get("sheet") if selected_item.get("sheet") in schedule.schedule_sheets else schedule.schedule_sheets[0]
             sheet = schedule.workbook[selected_sheet]
         except Exception as exc:
@@ -568,7 +664,10 @@ def render_viewer_mode():
             with download_pdf:
                 st.download_button("导出 A4 单页排班 PDF", data=pdf_bytes, file_name=f"排班结果{filename_suffix}.pdf", mime="application/pdf", type="primary", use_container_width=True)
             with download_excel:
-                st.download_button("下载排班 Excel", data=selected_item.get("excel", b""), file_name="排班结果.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+                excel_bytes = selected_item.get("excel")
+                if excel_bytes is None and selected_item.get("storage_path"):
+                    excel_bytes = supabase_store().download_file(selected_item["storage_path"])
+                st.download_button("下载排班 Excel", data=excel_bytes or b"", file_name="排班结果.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
         except Exception as exc:
             st.error(f"PDF 生成失败：{exc}")
 
