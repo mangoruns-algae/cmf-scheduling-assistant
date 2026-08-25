@@ -298,7 +298,7 @@ def _pdf_layout(records, available_width):
     return widths, font_size, leading, padding
 
 
-def export_records_pdf(records, title, selected_person=""):
+def _export_records_pdf_legacy(records, title, selected_person=""):
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import mm
@@ -599,7 +599,7 @@ def _pdf_fonts_v2():
     return cn, cn_bold, en, en_bold
 
 
-def _export_records_pdf_v2(records, title, selected_person=""):
+def export_records_pdf(records, title, selected_person=""):
     """Render an A4 single-page schedule in the source workbook's compact style."""
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
@@ -750,13 +750,11 @@ def _export_records_pdf_v2(records, title, selected_person=""):
     pdf.setStrokeColor(colors.HexColor("#1F2937"))
     pdf.setLineWidth(0.6)
     pdf.line(margin_x, y, margin_x + table_width, y)
+    pdf.setFillColor(colors.HexColor("#9CA3AF"))
+    draw_line("CMF PDF 0.2.9", page_width - margin_x, 5 * mm, 4.5, "right")
     pdf.showPage()
     pdf.save()
     return buffer.getvalue()
-
-
-# Use the refined renderer without changing callers or schedule data structures.
-export_records_pdf = _export_records_pdf_v2
 
 
 def export_schedule_pdf(sheet, selected_person=""):
