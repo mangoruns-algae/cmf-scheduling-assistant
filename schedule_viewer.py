@@ -544,6 +544,221 @@ def render_schedule_html(sheet, selected_person=""):
     """
 
 
+def _pdf_fonts_v2():
+    """Register clear sans-serif fonts on Windows and Streamlit/Linux."""
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    def first_available(name, paths):
+        if name in pdfmetrics.getRegisteredFontNames():
+            return name
+        for value in paths:
+            path = Path(value)
+            if not path.exists():
+                continue
+            try:
+                pdfmetrics.registerFont(TTFont(name, str(path)))
+                return name
+            except Exception:
+                continue
+        return ""
+
+    cn = first_available("CMFSansCN", [
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    ])
+    cn_bold = first_available("CMFSansCNBold", [
+        "C:/Windows/Fonts/msyhbd.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Bold.otf",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    ])
+    if not cn:
+        cn = "HeiseiKakuGo-W5"
+        if cn not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(UnicodeCIDFont(cn))
+    cn_bold = cn_bold or cn
+
+    en = first_available("CMFSansEN", [
+        "C:/Windows/Fonts/arial.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]) or "Helvetica"
+    en_bold = first_available("CMFSansENBold", [
+        "C:/Windows/Fonts/arialbd.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ]) or "Helvetica-Bold"
+    return cn, cn_bold, en, en_bold
+
+
+def _export_records_pdf_v2(records, title, selected_person=""):
+    """Render an A4 single-page schedule in the source workbook's compact style."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfgen import canvas
+
+    cn, cn_bold, en, en_bold = _pdf_fonts_v2()
+    page_width, page_height = A4
+    margin_x, margin_y = 17 * mm, 14 * mm
+    table_width = page_width - 2 * margin_x
+    widths = [table_width * ratio for ratio in (0.13, 0.13, 0.39, 0.13, 0.22)]
+    title_space = 25
+    note_space = 12 if selected_person else 0
+    table_top = page_height - margin_y - title_space - note_space
+    table_capacity = table_top - margin_y
+    buffer = io.BytesIO()
+
+    def face(char, bold=False):
+        codepoint = ord(char)
+        is_cjk = (
+            0x3000 <= codepoint <= 0x303F  # CJK punctuation
+            or 0x3400 <= codepoint <= 0x9FFF  # CJK ideographs
+            or 0xFF00 <= codepoint <= 0xFFEF  # full-width forms
+        )
+        return (cn_bold if bold else cn) if is_cjk else (en_bold if bold else en)
+
+    def measure(text, size, bold=False):
+        return sum(pdfmetrics.stringWidth(char, face(char, bold), size) for char in str(text))
+
+    def wrap(value, width, size):
+        result = []
+        for source in str(value or "").splitlines() or [""]:
+            current, used = "", 0.0
+            for char in source:
+                char_width = pdfmetrics.stringWidth(char, face(char), size)
+                if current and used + char_width > width:
+                    result.append(current)
+                    current, used = char, char_width
+                else:
+                    current += char
+                    used += char_width
+            result.append(current)
+        return result or [""]
+
+    def display_values(index, record):
+        values = [str(record.get(label, "") or "") for label in SCHEDULE_HEADERS]
+        if index == 0:
+            return values
+        previous = records[index - 1]
+        same_date = values[0] == str(previous.get(SCHEDULE_HEADERS[0], "") or "")
+        if same_date:
+            values[0] = ""
+            if values[1] == str(previous.get(SCHEDULE_HEADERS[1], "") or ""):
+                values[1] = ""
+            if values[3] == str(previous.get(SCHEDULE_HEADERS[3], "") or ""):
+                values[3] = ""
+        return values
+
+    def build_layout(size):
+        leading = size * 1.18
+        padding = max(0.65, size * 0.23)
+        header_height = leading + 2 * padding + 2
+        rows = []
+        for index, record in enumerate(records):
+            values = display_values(index, record)
+            cells = [wrap(value, widths[col] - 6, size) for col, value in enumerate(values)]
+            height = max(len(lines) for lines in cells) * leading + 2 * padding
+            rows.append((cells, height))
+        return leading, padding, header_height, rows
+
+    size = 7.7 if len(records) <= 42 else 6.8 if len(records) <= 65 else 5.9
+    leading, padding, header_height, row_layouts = build_layout(size)
+    while header_height + sum(height for _, height in row_layouts) > table_capacity and size > 4.3:
+        size = round(size - 0.2, 2)
+        leading, padding, header_height, row_layouts = build_layout(size)
+    total_height = header_height + sum(height for _, height in row_layouts)
+    if total_height > table_capacity:
+        ratio = table_capacity / total_height
+        header_height *= ratio
+        row_layouts = [(cells, height * ratio) for cells, height in row_layouts]
+        leading *= ratio
+
+    pdf = canvas.Canvas(buffer, pagesize=A4, pageCompression=1)
+    pdf.setTitle(str(title))
+
+    def draw_line(text, x, baseline, font_size, align="left", bold=False):
+        text = str(text)
+        line_width = measure(text, font_size, bold)
+        cursor = x - line_width / 2 if align == "center" else x - line_width if align == "right" else x
+        for char in text:
+            font = face(char, bold)
+            pdf.setFont(font, font_size)
+            pdf.drawString(cursor, baseline, char)
+            cursor += pdfmetrics.stringWidth(char, font, font_size)
+
+    pdf.setFillColor(colors.HexColor("#111827"))
+    draw_line(title, page_width / 2, page_height - margin_y - 14, 12.5, "center", True)
+    if selected_person:
+        pdf.setFillColor(colors.HexColor("#4B5563"))
+        draw_line(f"人员定位：{selected_person}（浅黄：参与班次；浅蓝日期：现场负责人）", margin_x, table_top + 4, 6.2)
+
+    y = table_top - header_height
+    pdf.setFillColor(colors.HexColor("#F3F4F6"))
+    pdf.rect(margin_x, y, table_width, header_height, fill=1, stroke=0)
+    x = margin_x
+    for label, width in zip(SCHEDULE_HEADERS, widths):
+        pdf.setFillColor(colors.HexColor("#111827"))
+        draw_line(label, x + width / 2, y + (header_height - size) / 2, size, "center", True)
+        x += width
+    pdf.setStrokeColor(colors.HexColor("#1F2937"))
+    pdf.setLineWidth(0.6)
+    pdf.line(margin_x, table_top, margin_x + table_width, table_top)
+    pdf.line(margin_x, y, margin_x + table_width, y)
+
+    for index, (record, (cells, row_height)) in enumerate(zip(records, row_layouts)):
+        row_top = y
+        y -= row_height
+        match_type = _record_match_type(record, selected_person)
+        if match_type == "participant":
+            pdf.setFillColor(colors.HexColor("#FFF4BF"))
+            pdf.rect(margin_x, y, table_width, row_height, fill=1, stroke=0)
+        elif match_type == "leader":
+            pdf.setFillColor(colors.HexColor("#DCEEFF"))
+            pdf.rect(margin_x, y, widths[0], row_height, fill=1, stroke=0)
+
+        x = margin_x
+        for column, (cell_lines, width) in enumerate(zip(cells, widths)):
+            text_height = len(cell_lines) * leading
+            baseline = y + (row_height + text_height) / 2 - leading + (leading - size) / 2
+            pdf.setFillColor(colors.HexColor("#111827"))
+            for line in cell_lines:
+                if column == 2:
+                    draw_line(line, x + 3, baseline, size)
+                else:
+                    draw_line(line, x + width / 2, baseline, size, "center")
+                baseline -= leading
+            x += width
+
+        previous = records[index - 1] if index else None
+        date_changed = previous is None or record.get(SCHEDULE_HEADERS[0], "") != previous.get(SCHEDULE_HEADERS[0], "")
+        time_changed = date_changed or record.get(SCHEDULE_HEADERS[1], "") != previous.get(SCHEDULE_HEADERS[1], "")
+        line_start = margin_x if date_changed else margin_x + widths[0] if time_changed else margin_x + widths[0] + widths[1]
+        pdf.setStrokeColor(colors.HexColor("#6B7280"))
+        pdf.setLineWidth(0.45 if date_changed else 0.22)
+        pdf.line(line_start, y, margin_x + table_width, y)
+
+    pdf.setStrokeColor(colors.HexColor("#1F2937"))
+    pdf.setLineWidth(0.6)
+    pdf.line(margin_x, y, margin_x + table_width, y)
+    pdf.showPage()
+    pdf.save()
+    return buffer.getvalue()
+
+
+# Use the refined renderer without changing callers or schedule data structures.
+export_records_pdf = _export_records_pdf_v2
+
+
 def export_schedule_pdf(sheet, selected_person=""):
     title = str(sheet.cell(2, 2).value or f"{sheet.title} 生产排班")
     return export_records_pdf(schedule_records(sheet), title, selected_person)

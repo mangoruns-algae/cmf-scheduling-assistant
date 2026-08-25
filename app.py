@@ -26,7 +26,7 @@ from supabase_store import SupabaseScheduleStore, SupabaseStoreError
 
 st.set_page_config(page_title="CMF 排班助手", page_icon="🤖", layout="wide")
 
-APP_VERSION = "0.2.7"
+APP_VERSION = "0.2.8"
 APP_UPDATED_AT = "2026.08.25"
 
 COLUMN_LABELS = {
