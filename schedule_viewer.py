@@ -65,14 +65,22 @@ def sheet_layout(sheet):
     return header_row, first_col, last_col, last_row
 
 
-def _display_value(value):
+def _display_value(value, date_only=False):
     if value is None:
         return ""
     if isinstance(value, datetime):
+        if date_only:
+            return value.strftime("%Y-%m-%d")
         return value.strftime("%Y-%m-%d %H:%M")
     if isinstance(value, date):
         return value.strftime("%Y-%m-%d")
-    return str(value)
+    text = str(value)
+    if date_only:
+        match = re.match(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", text.strip())
+        if match:
+            year, month, day = match.groups()
+            return f"{year}-{int(month):02d}-{int(day):02d}"
+    return text
 
 
 def _split_joined_chinese_names(token):
@@ -116,13 +124,16 @@ def normalize_people_text(value):
     return "、".join(dict.fromkeys(normalized))
 
 
-def _merged_value(sheet, row, col):
+def _merged_value(sheet, row, col, date_only=False):
     cell = sheet.cell(row, col)
     if not isinstance(cell, MergedCell):
-        return _display_value(cell.value)
+        return _display_value(cell.value, date_only=date_only)
     for merged in sheet.merged_cells.ranges:
         if merged.min_row <= row <= merged.max_row and merged.min_col <= col <= merged.max_col:
-            return _display_value(sheet.cell(merged.min_row, merged.min_col).value)
+            return _display_value(
+                sheet.cell(merged.min_row, merged.min_col).value,
+                date_only=date_only,
+            )
     return ""
 
 
@@ -130,7 +141,10 @@ def schedule_records(sheet):
     header_row, first_col, _, last_row = sheet_layout(sheet)
     records = []
     for row in range(header_row + 1, last_row + 1):
-        values = [_merged_value(sheet, row, first_col + offset).strip() for offset in range(5)]
+        values = [
+            _merged_value(sheet, row, first_col + offset, date_only=offset == 0).strip()
+            for offset in range(5)
+        ]
         values[3] = normalize_people_text(values[3])
         values[4] = normalize_people_text(values[4])
         if any(values):
@@ -751,7 +765,7 @@ def export_records_pdf(records, title, selected_person=""):
     pdf.setLineWidth(0.6)
     pdf.line(margin_x, y, margin_x + table_width, y)
     pdf.setFillColor(colors.HexColor("#9CA3AF"))
-    draw_line("CMF PDF 0.2.9", page_width - margin_x, 5 * mm, 4.5, "right")
+    draw_line("CMF PDF 0.2.11", page_width - margin_x, 5 * mm, 4.5, "right")
     pdf.showPage()
     pdf.save()
     return buffer.getvalue()

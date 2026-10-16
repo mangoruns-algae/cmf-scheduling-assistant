@@ -106,5 +106,5 @@ def generate_schedule(staff_df, availability_df, demand_df, rules_df=None):
 
     result = pd.DataFrame(rows)
     if not result.empty:
-        result["date"] = pd.to_datetime(result["date"])
+        result["date"] = pd.to_datetime(result["date"]).dt.date
     return result

@@ -26,8 +26,8 @@ from supabase_store import SupabaseScheduleStore, SupabaseStoreError
 
 st.set_page_config(page_title="CMF 排班助手", page_icon="🤖", layout="wide")
 
-APP_VERSION = "0.2.10"
-APP_UPDATED_AT = "2026.09.02"
+APP_VERSION = "0.2.11"
+APP_UPDATED_AT = "2026.10.16"
 
 COLUMN_LABELS = {
     "employee_id": "员工编号",
@@ -107,7 +107,7 @@ def persistent_board_items():
             "storage_path": row.get("storage_path"),
             "sheet": row.get("sheet_name"),
             "locked_by": row.get("uploaded_by") or "未知账户",
-            "locked_at": str(row.get("created_at") or "")[:16].replace("T", " "),
+            "locked_at": date_only_text(row.get("created_at")),
             "task_count": row.get("task_count") or 0,
             "date_range": date_range,
             "records": row.get("records") or [],
@@ -142,9 +142,31 @@ def can_create(username):
     return str(username).casefold() in CREATOR_USERS
 
 
+def date_only_text(value):
+    """Return a display-safe ISO date without a midnight time suffix."""
+    if value in (None, ""):
+        return ""
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d")
+    text = str(value).strip()
+    match = re.match(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", text)
+    if match:
+        year, month, day = match.groups()
+        return f"{year}-{int(month):02d}-{int(day):02d}"
+    return text
+
+
 def table_config(frame):
     """Return display-only column labels without changing the underlying data."""
-    return {column: COLUMN_LABELS[column] for column in frame.columns if column in COLUMN_LABELS}
+    config = {}
+    for column in frame.columns:
+        if column not in COLUMN_LABELS:
+            continue
+        if column == "date":
+            config[column] = st.column_config.DateColumn(COLUMN_LABELS[column], format="YYYY-MM-DD")
+        else:
+            config[column] = COLUMN_LABELS[column]
+    return config
 
 
 def table_height(frame, maximum=520):
@@ -473,6 +495,7 @@ def render_creator_mode():
         st.dataframe(result, use_container_width=True, hide_index=True, height=table_height(result), column_config=table_config(result))
         view = result[result["status"] == "已排班"].copy()
         if not view.empty:
+            view["date"] = view["date"].map(date_only_text)
             view["安排"] = view["production_line"].astype(str) + " / " + view["shift"].astype(str) + " / " + view["task_type"].astype(str)
             matrix = view.pivot_table(index="employee_name", columns="date", values="安排", aggfunc=lambda values: "；".join(values))
             st.subheader("人员 × 日期 班表视图")
@@ -489,11 +512,11 @@ def render_creator_mode():
                 records = generated_schedule_records(result)
                 item = {
                     "kind": "generated",
-                    "name": f"排班结果-{datetime.now().strftime('%Y%m%d-%H%M')}",
+                    "name": f"排班结果-{datetime.now().strftime('%Y%m%d')}",
                     "records": records,
                     "excel": output_bytes,
                     "locked_by": current_username,
-                    "locked_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "locked_at": datetime.now().strftime("%Y-%m-%d"),
                     "task_count": len(records),
                     "date_range": f"{records[0]['日期']} 至 {records[-1]['日期']}" if records else "无日期",
                 }
@@ -619,7 +642,7 @@ def render_viewer_mode():
     title_col, action_col = st.columns([4, 1])
     with title_col:
         st.markdown(f"### {selected_item.get('name')}")
-        st.caption(f"上传人 {selected_item.get('locked_by')} · 暂存时间 {selected_item.get('locked_at')}")
+        st.caption(f"上传人 {selected_item.get('locked_by')} · 上传日期 {selected_item.get('locked_at')}")
     if creator_access:
         with action_col:
             if st.button("从看板移除", key=f"remove_{selected_id}", use_container_width=True):
